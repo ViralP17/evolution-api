@@ -110,6 +110,11 @@ model Instance {
   N8nSetting              N8nSetting[]
   Evoai                   Evoai[]
   EvoaiSetting            EvoaiSetting?
+  isOn                    Boolean                  @default(false)
+  LicenseKey              String
+  scanAllowed             Int?
+  serverKey               String?
+  domain                  String?
 }
 
 model Session {
@@ -118,6 +123,8 @@ model Session {
   creds     String?  @db.Text
   createdAt DateTime @default(now()) @db.Timestamp
   Instance  Instance @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  domain    String?  @db.VarChar(100)
+
 }
 
 model Chat {
@@ -207,6 +214,8 @@ model Webhook {
   updatedAt       DateTime  @updatedAt @db.Timestamp
   Instance        Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   instanceId      String    @unique
+  domain          String?
+  webhook_limit   Boolean?   @default(false)
 
   @@index([instanceId])
 }

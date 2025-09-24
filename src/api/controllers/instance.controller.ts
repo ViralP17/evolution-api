@@ -3,6 +3,7 @@ import { ChatwootService } from '@api/integrations/chatbot/chatwoot/services/cha
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { channelController, eventManager } from '@api/server.module';
+import { AuthService } from '@api/services/auth.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
 import { SettingsService } from '@api/services/settings.service';
@@ -30,12 +31,29 @@ export class InstanceController {
     private readonly chatwootCache: CacheService,
     private readonly baileysCache: CacheService,
     private readonly providerFiles: ProviderFiles,
+    private readonly authService: AuthService,
   ) {}
 
   private readonly logger = new Logger('InstanceController');
 
   public async createInstance(instanceData: InstanceDto) {
+    if (!instanceData.LicenseKey) {
+      throw new BadRequestException('License Key is required');
+    }
     try {
+      const res = await this.authService.checkLicenseKey(instanceData.LicenseKey);
+      if (!res) {
+        throw new UnauthorizedException('License Key is not valid');
+      }
+      const { scanAllowed, LicType } = res;
+
+      console.log('LicType & ScanAllowed', { LicType, scanAllowed });
+
+      const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
+      if (!allow) {
+        throw new UnauthorizedException('Connection creation limit reached');
+      }
+
       const instance = channelController.init(instanceData, {
         configService: this.configService,
         eventEmitter: this.eventEmitter,
@@ -70,6 +88,8 @@ export class InstanceController {
         number: instanceData.number,
         businessId: instanceData.businessId,
         status: instanceData.status,
+        LicenseKey: instanceData.LicenseKey,
+        serverkey: instanceData.serverkey,
       });
 
       instance.setInstance({
@@ -79,6 +99,7 @@ export class InstanceController {
         token: hash,
         number: instanceData.number,
         businessId: instanceData.businessId,
+        domain: instanceData.domain,
       });
 
       this.waMonitor.waInstances[instance.instanceName] = instance;
@@ -143,9 +164,13 @@ export class InstanceController {
         let getQrcode: wa.QrCode;
 
         if (instanceData.qrcode && instanceData.integration === Integration.WHATSAPP_BAILEYS) {
-          await instance.connectToWhatsapp(instanceData.number);
-          await delay(5000);
-          getQrcode = instance.qrCode;
+          const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
+
+          if (allow) {
+            await instance.connectToWhatsapp(instanceData.number);
+            await delay(5000);
+            getQrcode = instance.qrCode;
+          }
         }
 
         const result = {
@@ -157,6 +182,8 @@ export class InstanceController {
             accessTokenWaBusiness,
             status: instance.connectionStatus.state,
           },
+          serverkey: instanceData?.serverkey,
+
           hash,
           webhook: {
             webhookUrl: instanceData?.webhook?.url,

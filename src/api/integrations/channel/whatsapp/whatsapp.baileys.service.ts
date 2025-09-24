@@ -261,9 +261,9 @@ export class BaileysStartupService extends ChannelStartupService {
     return this.stateConnection;
   }
 
-  public async logoutInstance() {
+  public async logoutInstance(msg = '') {
     this.messageProcessor.onDestroy();
-    await this.client?.logout('Log out instance: ' + this.instanceName);
+    await this.client?.logout(msg ? msg : 'Log out instance: ' + this.instanceName);
 
     this.client?.ws?.close();
 
@@ -449,6 +449,23 @@ export class BaileysStartupService extends ChannelStartupService {
       }
       const formattedWuid = this.instance.wuid.split('@')[0].padEnd(30, ' ');
       const formattedName = this.instance.name;
+      const instancList = await this.prismaRepository.instance.findFirst({
+        where: {
+          ownerJid: this.instance.wuid,
+          name: {
+            not: this.instance.name,
+          },
+          // domain:this.instance.domain,
+          connectionStatus: 'open',
+        },
+      });
+      console.log({ instancList });
+
+      if (instancList) {
+        console.log('Duplicate number connected');
+
+        return this.logoutInstance('Duplicate number connected');
+      }
       this.logger.info(
         `
         ┌──────────────────────────────┐

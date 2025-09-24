@@ -47,6 +47,9 @@ export type SaveData = {
   IS_ON_WHATSAPP_DAYS: number;
 };
 
+export type licenseurl = string;
+export type serverkey = string;
+
 export type DBConnection = {
   URI: string;
   CLIENT_NAME: string;
@@ -317,6 +320,8 @@ export interface Env {
   S3?: S3;
   AUTHENTICATION: Auth;
   PRODUCTION?: Production;
+  LICENSEURL: licenseurl;
+  SERVERKEY: serverkey;
 }
 
 export type Key = keyof Env;
@@ -660,6 +665,8 @@ export class ConfigService {
         },
         EXPOSE_IN_FETCH_INSTANCES: process.env?.AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES === 'true',
       },
+      SERVERKEY: process.env.SERVERKEY || 'local',
+      LICENSEURL: process.env.LICENSEURL,
     };
   }
 }

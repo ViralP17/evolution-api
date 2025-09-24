@@ -29,6 +29,11 @@ export class InstanceDto extends IntegrationDto {
   proxyProtocol?: string;
   proxyUsername?: string;
   proxyPassword?: string;
+  LicenseKey?: string;
+  LicType?: string;
+  scanAllowed?: string;
+  serverkey?: string;
+  domain?: string;
   webhook?: {
     enabled?: boolean;
     events?: string[];

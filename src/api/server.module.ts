@@ -39,6 +39,7 @@ import { S3Controller } from './integrations/storage/s3/controllers/s3.controlle
 import { S3Service } from './integrations/storage/s3/services/s3.service';
 import { ProviderFiles } from './provider/sessions';
 import { PrismaRepository } from './repository/repository.service';
+import { AuthService } from './services/auth.service';
 import { CacheService } from './services/cache.service';
 import { WAMonitoringService } from './services/monitor.service';
 import { ProxyService } from './services/proxy.service';
@@ -86,6 +87,7 @@ export const chatwootController = new ChatwootController(chatwootService, config
 
 const settingsService = new SettingsService(waMonitor);
 export const settingsController = new SettingsController(settingsService);
+const authService = new AuthService(prismaRepository, configService);
 
 export const instanceController = new InstanceController(
   waMonitor,
@@ -99,6 +101,7 @@ export const instanceController = new InstanceController(
   chatwootCache,
   baileysCache,
   providerFiles,
+  authService,
 );
 export const sendMessageController = new SendMessageController(waMonitor);
 export const callController = new CallController(waMonitor);

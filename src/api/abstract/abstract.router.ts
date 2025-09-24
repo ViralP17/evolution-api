@@ -36,6 +36,7 @@ export abstract class RouterBroker {
     if (request?.query && Object.keys(request.query).length > 0) {
       Object.assign(instance, request.query);
     }
+    instance['serverkey'] = (request.headers['serverkey'] as string) || 'local';
 
     if (request.originalUrl.includes('/instance/create')) {
       Object.assign(instance, body);

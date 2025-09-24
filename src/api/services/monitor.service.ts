@@ -3,7 +3,15 @@ import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { channelController } from '@api/server.module';
 import { Events, Integration } from '@api/types/wa.types';
-import { CacheConf, Chatwoot, ConfigService, Database, DelInstance, ProviderSession } from '@config/env.config';
+import {
+  CacheConf,
+  Chatwoot,
+  ConfigService,
+  Database,
+  DelInstance,
+  ProviderSession,
+  serverkey,
+} from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { INSTANCE_DIR, STORE_DIR } from '@config/path.config';
 import { NotFoundException } from '@exceptions';
@@ -236,6 +244,8 @@ export class WAMonitoringService {
           token: data.hash,
           clientName: clientName,
           businessId: data.businessId,
+          LicenseKey: data.LicenseKey,
+          serverKey: data.serverkey,
         },
       });
     } catch (error) {
@@ -309,9 +319,10 @@ export class WAMonitoringService {
 
   private async loadInstancesFromDatabasePostgres() {
     const clientName = await this.configService.get<Database>('DATABASE').CONNECTION.CLIENT_NAME;
+    const serverKey = this.configService.get<serverkey>('SERVERKEY');
 
     const instances = await this.prismaRepository.instance.findMany({
-      where: { clientName: clientName },
+      where: { clientName: clientName, serverKey: serverKey },
     });
 
     if (instances.length === 0) {
