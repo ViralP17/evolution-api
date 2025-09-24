@@ -328,7 +328,7 @@ model Kafka {
   events     Json      @db.JsonB
   createdAt  DateTime? @default(now()) @db.Timestamp
   updatedAt  DateTime  @updatedAt @db.Timestamp
-  Instance   Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  Instance   Instance?  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   instanceId String    @unique
 }
 
