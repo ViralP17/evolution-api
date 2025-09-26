@@ -49,6 +49,7 @@ export class AuthService {
   public async isAllowedMoreScan(licenceKey: string, scanAllowed: string) {
     try {
       const db = this.configService.get<Database>('DATABASE');
+      console.log({ db });
       const docs = await this.prismaRepository.instance.findMany({
         where: { LicenseKey: licenceKey, connectionStatus: 'open' },
       });
@@ -58,6 +59,7 @@ export class AuthService {
       }
       return true;
     } catch (e) {
+      console.log({ e });
       return false;
     }
   }
