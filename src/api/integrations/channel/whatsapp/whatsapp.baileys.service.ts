@@ -4226,7 +4226,11 @@ export class BaileysStartupService extends ChannelStartupService {
       };
 
       if (getParticipants.getParticipants == 'true') {
-        result['participants'] = group.participants;
+        // result['participants'] = group.participants;
+        result['participants'] = group.participants.map((p) => ({
+          ...p,
+          jid: p.phoneNumber, // ✅ copy phoneNumber into jid
+        }));
       }
 
       groups = [...groups, result];
@@ -4303,6 +4307,7 @@ export class BaileysStartupService extends ChannelStartupService {
         const contact = contacts.find((c) => c.remoteJid === participant.id);
         return {
           ...participant,
+          jid: participant.phoneNumber,
           name: participant.name ?? contact?.pushName,
           imgUrl: participant.imgUrl ?? contact?.profilePicUrl,
         };

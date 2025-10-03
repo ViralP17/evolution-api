@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-namespace */
 import { JsonValue } from '@prisma/client/runtime/library';
-import { AuthenticationState, WAConnectionState } from 'baileys';
+import { AuthenticationState, GroupParticipant, WAConnectionState } from 'baileys';
 
 export enum Events {
   APPLICATION_STARTUP = 'application.startup',
@@ -153,4 +153,8 @@ export const Integration = {
   WHATSAPP_BUSINESS: 'WHATSAPP-BUSINESS',
   WHATSAPP_BAILEYS: 'WHATSAPP-BAILEYS',
   EVOLUTION: 'EVOLUTION',
+};
+
+export type GroupParticipantCT = GroupParticipant & {
+  jid: string;
 };
