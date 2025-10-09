@@ -4504,6 +4504,7 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
+    const targetStatus = 'DELIVERY_ACK'; // fixed status value
     const [chat, unreadMessages] = await Promise.all([
       this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
       // Use raw SQL to avoid JSON path issues
@@ -4512,7 +4513,7 @@ export class BaileysStartupService extends ChannelStartupService {
         WHERE "instanceId" = ${this.instanceId}
         AND "key"->>'remoteJid' = ${remoteJid}
         AND ("key"->>'fromMe')::boolean = false
-        AND "status" = ${status[3]}
+        AND "status" = ${targetStatus}
       `.then((result: any[]) => result[0]?.count || 0),
     ]);
 
