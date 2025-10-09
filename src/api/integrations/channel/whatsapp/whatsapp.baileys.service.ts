@@ -4504,25 +4504,30 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
-    const targetStatus = 'DELIVERY_ACK'; // fixed status value
-    const [chat, unreadMessages] = await Promise.all([
-      this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
-      // Use raw SQL to avoid JSON path issues
-      this.prismaRepository.$queryRaw`
-        SELECT COUNT(*)::int as count FROM "Message" 
-        WHERE "instanceId" = ${this.instanceId}
-        AND "key"->>'remoteJid' = ${remoteJid}
-        AND ("key"->>'fromMe')::boolean = false
-        AND "status" = ${targetStatus}
-      `.then((result: any[]) => result[0]?.count || 0),
-    ]);
+  const [chat, unreadMessages] = await Promise.all([
+    this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
+    this.prismaRepository.$queryRaw<
+      { count: number }[]
+    >`
+      SELECT COUNT(*) AS count
+      FROM Message
+      WHERE instanceId = ${this.instanceId}
+        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ${remoteJid}
+        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.fromMe')) = 'false'
+        AND status = ${status[3]}
+    `.then((result) => result[0]?.count || 0),
+  ]);
+  console.log('Unread messages count:', unreadMessages);
 
-    if (chat && chat.unreadMessages !== unreadMessages) {
-      await this.prismaRepository.chat.update({ where: { id: chat.id }, data: { unreadMessages } });
-    }
-
-    return unreadMessages;
+  if (chat && chat.unreadMessages !== unreadMessages) {
+    await this.prismaRepository.chat.update({
+      where: { id: chat.id },
+      data: { unreadMessages:Number(unreadMessages) },
+    });
   }
+
+  return unreadMessages;
+}
 
   private async addLabel(labelId: string, instanceId: string, chatId: string) {
     const id = cuid();
@@ -4762,6 +4767,7 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async fetchMessages(query: Query<Message>) {
+    console.log('fetchMessages query', query);
     const keyFilters = query?.where?.key as ExtendedIMessageKey;
 
     const timestampFilter = {};
