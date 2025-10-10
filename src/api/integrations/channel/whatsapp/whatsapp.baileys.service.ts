@@ -924,6 +924,30 @@ export class BaileysStartupService extends ChannelStartupService {
     },
   };
 
+  private normalizeMessageTimestamp(ts: any): number {
+    try {
+      if (Long.isLong(ts)) {
+        // e.g. Long { low: 1753095791, high: 0, unsigned: true }
+        return ts.toNumber();
+      }
+
+      if (typeof ts === 'object' && ts?.low !== undefined) {
+        // e.g. { low: 1753095791, high: 0, unsigned: true }
+        return new Long(ts.low, ts.high ?? 0, ts.unsigned ?? true).toNumber();
+      }
+
+      if (typeof ts === 'number' && !isNaN(ts)) {
+        return ts;
+      }
+
+      // fallback: use current time (seconds)
+      return Math.floor(Date.now() / 1000);
+    } catch (err) {
+      console.error('Failed to normalize messageTimestamp:', err, ts);
+      return Math.floor(Date.now() / 1000);
+    }
+  }
+
   private readonly messageHandle = {
     'messaging-history.set': async ({
       messages,
@@ -1025,9 +1049,7 @@ export class BaileysStartupService extends ChannelStartupService {
             m.key.remoteJid = (m.key as ExtendedIMessageKey).senderPn;
           }
 
-          if (Long.isLong(m?.messageTimestamp)) {
-            m.messageTimestamp = m.messageTimestamp?.toNumber();
-          }
+          m.messageTimestamp = this.normalizeMessageTimestamp(m.messageTimestamp);
 
           if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) {
             if (m.messageTimestamp <= timestampLimitToImport) {
@@ -1187,9 +1209,7 @@ export class BaileysStartupService extends ChannelStartupService {
             continue;
           }
 
-          if (Long.isLong(received.messageTimestamp)) {
-            received.messageTimestamp = received.messageTimestamp?.toNumber();
-          }
+          received.messageTimestamp = this.normalizeMessageTimestamp(received.messageTimestamp);
 
           if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
             continue;
@@ -4606,15 +4626,8 @@ export class BaileysStartupService extends ChannelStartupService {
       await this.prismaRepository.chat.update({ where: { id: chat.id }, data: { unreadMessages } });
     }
 
-  if (chat && chat.unreadMessages !== unreadMessages) {
-    await this.prismaRepository.chat.update({
-      where: { id: chat.id },
-      data: { unreadMessages:Number(unreadMessages) },
-    });
+    return unreadMessages;
   }
-
-  return unreadMessages;
-}
 
   private async addLabel(labelId: string, instanceId: string, chatId: string) {
     const id = cuid();
