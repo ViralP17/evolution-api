@@ -1,5 +1,5 @@
 -- CreateTable
-CREATE TABLE "evolution_api"."Kafka" (
+CREATE TABLE "Kafka" (
     "id" TEXT NOT NULL,
     "enabled" BOOLEAN NOT NULL DEFAULT false,
     "events" JSONB NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE "evolution_api"."Kafka" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Kafka_instanceId_key" ON "evolution_api"."Kafka"("instanceId");
+CREATE UNIQUE INDEX "Kafka_instanceId_key" ON "Kafka"("instanceId");
 
 -- AddForeignKey
-ALTER TABLE "evolution_api"."Kafka" ADD CONSTRAINT "Kafka_instanceId_fkey" FOREIGN KEY ("instanceId") REFERENCES "evolution_api"."Instance"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Kafka" ADD CONSTRAINT "Kafka_instanceId_fkey" FOREIGN KEY ("instanceId") REFERENCES "Instance"("id") ON DELETE CASCADE ON UPDATE CASCADE;
