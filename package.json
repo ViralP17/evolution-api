@@ -1,6 +1,6 @@
 {
   "name": "CRMTiger-WA",
-  "version": "2.3.5.8.pg",
+  "version": "2.3.5.8.scalla",
   "description": "Rest api for communication with WhatsApp",
   "main": "./dist/main.js",
   "type": "commonjs",
