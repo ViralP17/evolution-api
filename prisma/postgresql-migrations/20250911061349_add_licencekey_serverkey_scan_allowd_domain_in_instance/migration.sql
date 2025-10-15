@@ -5,15 +5,15 @@
 
 */
 -- AlterTable
-ALTER TABLE "evolution_api"."Instance" ADD COLUMN     "LicenseKey" TEXT NOT NULL,
+ALTER TABLE "Instance" ADD COLUMN     "LicenseKey" TEXT NOT NULL,
 ADD COLUMN     "domain" TEXT,
 ADD COLUMN     "isOn" BOOLEAN NOT NULL DEFAULT false,
 ADD COLUMN     "scanAllowed" INTEGER,
 ADD COLUMN     "serverKey" TEXT;
 
 -- AlterTable
-ALTER TABLE "evolution_api"."Session" ADD COLUMN     "domain" VARCHAR(100);
+ALTER TABLE "Session" ADD COLUMN     "domain" VARCHAR(100);
 
 -- AlterTable
-ALTER TABLE "evolution_api"."Webhook" ADD COLUMN     "domain" TEXT,
+ALTER TABLE "Webhook" ADD COLUMN     "domain" TEXT,
 ADD COLUMN     "webhook_limit" BOOLEAN DEFAULT false;
