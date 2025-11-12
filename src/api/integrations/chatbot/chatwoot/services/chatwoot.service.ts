@@ -1,6 +1,5 @@
 import { InstanceDto } from '@api/dto/instance.dto';
 import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
-import { ExtendedMessageKey } from '@api/integrations/channel/whatsapp/whatsapp.baileys.service';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
@@ -24,16 +23,15 @@ import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageM
 import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
-import { proto } from 'baileys';
+import { WAMessageContent, WAMessageKey } from 'baileys';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
 import { Jimp, JimpMime } from 'jimp';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import Long from 'long';
 import mimeTypes from 'mime-types';
 import path from 'path';
 import { Readable } from 'stream';
-
-const MIN_CONNECTION_NOTIFICATION_INTERVAL_MS = 30000; // 30 seconds
 
 interface ChatwootMessage {
   messageId?: number;
@@ -45,22 +43,6 @@ interface ChatwootMessage {
 
 export class ChatwootService {
   private readonly logger = new Logger('ChatwootService');
-
-  // HTTP timeout constants
-  private readonly MEDIA_DOWNLOAD_TIMEOUT_MS = 60000; // 60 seconds for large files
-
-  // S3/MinIO retry configuration (external storage - longer delays, fewer retries)
-  private readonly S3_MAX_RETRIES = 3;
-  private readonly S3_BASE_DELAY_MS = 1000; // Base delay: 1 second
-  private readonly S3_MAX_DELAY_MS = 8000; // Max delay: 8 seconds
-
-  // Database polling retry configuration (internal DB - shorter delays, more retries)
-  private readonly DB_POLLING_MAX_RETRIES = 5;
-  private readonly DB_POLLING_BASE_DELAY_MS = 100; // Base delay: 100ms
-  private readonly DB_POLLING_MAX_DELAY_MS = 2000; // Max delay: 2 seconds
-
-  // Webhook processing delay
-  private readonly WEBHOOK_INITIAL_DELAY_MS = 500; // Initial delay before processing webhook
 
   // Lock polling delay
   private readonly LOCK_POLLING_DELAY_MS = 300; // Delay between lock status checks
@@ -74,9 +56,7 @@ export class ChatwootService {
     private readonly cache: CacheService,
   ) {}
 
-  private async getPgClient() {
-    return postgresClient.getChatwootConnection();
-  }
+  private pgClient = postgresClient.getChatwootConnection();
 
   private async getProvider(instance: InstanceDto): Promise<ChatwootModel | null> {
     const cacheKey = `${instance.instanceName}:getProvider`;
@@ -405,8 +385,7 @@ export class ChatwootService {
       if (!uri) return false;
 
       const sqlTags = `SELECT id, taggings_count FROM tags WHERE name = $1 LIMIT 1`;
-      const pgClient = await this.getPgClient();
-      const tagData = (await pgClient.query(sqlTags, [nameInbox]))?.rows[0];
+      const tagData = (await this.pgClient.query(sqlTags, [nameInbox]))?.rows[0];
       let tagId = tagData?.id;
       const taggingsCount = tagData?.taggings_count || 0;
 
@@ -416,18 +395,18 @@ export class ChatwootService {
                       DO UPDATE SET taggings_count = tags.taggings_count + 1 
                       RETURNING id`;
 
-      tagId = (await pgClient.query(sqlTag, [nameInbox, taggingsCount + 1]))?.rows[0]?.id;
+      tagId = (await this.pgClient.query(sqlTag, [nameInbox, taggingsCount + 1]))?.rows[0]?.id;
 
       const sqlCheckTagging = `SELECT 1 FROM taggings 
                                WHERE tag_id = $1 AND taggable_type = 'Contact' AND taggable_id = $2 AND context = 'labels' LIMIT 1`;
 
-      const taggingExists = (await pgClient.query(sqlCheckTagging, [tagId, contactId]))?.rowCount > 0;
+      const taggingExists = (await this.pgClient.query(sqlCheckTagging, [tagId, contactId]))?.rowCount > 0;
 
       if (!taggingExists) {
         const sqlInsertLabel = `INSERT INTO taggings (tag_id, taggable_type, taggable_id, context, created_at) 
                                 VALUES ($1, 'Contact', $2, 'labels', NOW())`;
 
-        await pgClient.query(sqlInsertLabel, [tagId, contactId]);
+        await this.pgClient.query(sqlInsertLabel, [tagId, contactId]);
       }
 
       return true;
@@ -592,27 +571,31 @@ export class ChatwootService {
   }
 
   public async createConversation(instance: InstanceDto, body: any) {
-    const isLid = body.key.previousRemoteJid?.includes('@lid') && body.key.senderPn;
-    const remoteJid = body.key.remoteJid;
+    const isLid = body.key.addressingMode === 'lid';
+    const isGroup = body.key.remoteJid.endsWith('@g.us');
+    const phoneNumber = isLid && !isGroup ? body.key.remoteJidAlt : body.key.remoteJid;
+    const { remoteJid } = body.key;
     const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
     const lockKey = `${instance.instanceName}:lock:createConversation-${remoteJid}`;
-    const maxWaitTime = 5000; // 5 secounds
+    const maxWaitTime = 5000; // 5 seconds
+    const client = await this.clientCw(instance);
+    if (!client) return null;
 
     try {
       // Processa atualização de contatos já criados @lid
-      if (isLid && body.key.senderPn !== body.key.previousRemoteJid) {
-        const contact = await this.findContact(instance, body.key.remoteJid.split('@')[0]);
-        if (contact && contact.identifier !== body.key.senderPn) {
+      if (phoneNumber && remoteJid && !isGroup) {
+        const contact = await this.findContact(instance, phoneNumber.split('@')[0]);
+        if (contact && contact.identifier !== remoteJid) {
           this.logger.verbose(
-            `Identifier needs update: (contact.identifier: ${contact.identifier}, body.key.remoteJid: ${body.key.remoteJid}, body.key.senderPn: ${body.key.senderPn}`,
+            `Identifier needs update: (contact.identifier: ${contact.identifier}, phoneNumber: ${phoneNumber}, body.key.remoteJidAlt: ${remoteJid}`,
           );
           const updateContact = await this.updateContact(instance, contact.id, {
-            identifier: body.key.senderPn,
-            phone_number: `+${body.key.senderPn.split('@')[0]}`,
+            identifier: phoneNumber,
+            phone_number: `+${phoneNumber.split('@')[0]}`,
           });
 
           if (updateContact === null) {
-            const baseContact = await this.findContact(instance, body.key.senderPn.split('@')[0]);
+            const baseContact = await this.findContact(instance, phoneNumber.split('@')[0]);
             if (baseContact) {
               await this.mergeContacts(baseContact.id, contact.id);
               this.logger.verbose(
@@ -625,7 +608,30 @@ export class ChatwootService {
       this.logger.verbose(`--- Start createConversation ---`);
       this.logger.verbose(`Instance: ${JSON.stringify(instance)}`);
 
-      // Always check Chatwoot first, cache only as fallback
+      // If it already exists in the cache, return conversationId
+      if (await this.cache.has(cacheKey)) {
+        const conversationId = (await this.cache.get(cacheKey)) as number;
+        this.logger.verbose(`Found conversation to: ${phoneNumber}, conversation ID: ${conversationId}`);
+        let conversationExists: any;
+        try {
+          conversationExists = await client.conversations.get({
+            accountId: this.provider.accountId,
+            conversationId: conversationId,
+          });
+          this.logger.verbose(
+            `Conversation exists: ID: ${conversationExists.id} - Name: ${conversationExists.meta.sender.name} - Identifier: ${conversationExists.meta.sender.identifier}`,
+          );
+        } catch (error) {
+          this.logger.error(`Error getting conversation: ${error}`);
+          conversationExists = false;
+        }
+        if (!conversationExists) {
+          this.logger.verbose('Conversation does not exist, re-calling createConversation');
+          this.cache.delete(cacheKey);
+          return await this.createConversation(instance, body);
+        }
+        return conversationId;
+      }
 
       // If lock already exists, wait until release or timeout
       if (await this.cache.has(lockKey)) {
@@ -651,15 +657,14 @@ export class ChatwootService {
 
       try {
         /*
-        Double check after lock - REMOVED
-        This was causing the system to use cached conversations instead of checking Chatwoot
+        Double check after lock
+        Utilizei uma nova verificação para evitar que outra thread execute entre o terminio do while e o set lock
         */
+        if (await this.cache.has(cacheKey)) {
+          return (await this.cache.get(cacheKey)) as number;
+        }
 
-        const client = await this.clientCw(instance);
-        if (!client) return null;
-
-        const isGroup = remoteJid.includes('@g.us');
-        const chatId = isGroup ? remoteJid : remoteJid.split('@')[0];
+        const chatId = isGroup ? remoteJid : phoneNumber.split('@')[0].split(':')[0];
         let nameContact = !body.key.fromMe ? body.pushName : chatId;
         const filterInbox = await this.getInbox(instance);
         if (!filterInbox) return null;
@@ -667,19 +672,22 @@ export class ChatwootService {
         if (isGroup) {
           this.logger.verbose(`Processing group conversation`);
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
-          this.logger.verbose(`Group metadata: ${JSON.stringify(group)}`);
+          this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
+          const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
           nameContact = `${group.subject} (GROUP)`;
 
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
-            body.key.participant.split('@')[0],
+            participantJid.split('@')[0],
           );
           this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
 
-          const findParticipant = await this.findContact(instance, body.key.participant.split('@')[0]);
-          this.logger.verbose(`Found participant: ${JSON.stringify(findParticipant)}`);
+          const findParticipant = await this.findContact(instance, participantJid.split('@')[0]);
 
           if (findParticipant) {
+            this.logger.verbose(
+              `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
+            );
             if (!findParticipant.name || findParticipant.name === chatId) {
               await this.updateContact(instance, findParticipant.id, {
                 name: body.pushName,
@@ -689,12 +697,12 @@ export class ChatwootService {
           } else {
             await this.createContact(
               instance,
-              body.key.participant.split('@')[0],
+              participantJid.split('@')[0].split(':')[0],
               filterInbox.id,
               false,
               body.pushName,
               picture_url.profilePictureUrl || null,
-              body.key.participant,
+              participantJid,
             );
           }
         }
@@ -702,23 +710,17 @@ export class ChatwootService {
         const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(chatId);
         this.logger.verbose(`Contact profile picture URL: ${JSON.stringify(picture_url)}`);
 
+        this.logger.verbose(`Searching contact for: ${chatId}`);
         let contact = await this.findContact(instance, chatId);
 
         if (contact) {
-          this.logger.verbose(`Found contact: ${JSON.stringify(contact)}`);
+          this.logger.verbose(`Found contact: ID:${contact.id} - Name:${contact.name}`);
           if (!body.key.fromMe) {
             const waProfilePictureFile =
               picture_url?.profilePictureUrl?.split('#')[0].split('?')[0].split('/').pop() || '';
             const chatwootProfilePictureFile = contact?.thumbnail?.split('#')[0].split('?')[0].split('/').pop() || '';
             const pictureNeedsUpdate = waProfilePictureFile !== chatwootProfilePictureFile;
-            const nameNeedsUpdate =
-              !contact.name ||
-              contact.name === chatId ||
-              (`+${chatId}`.startsWith('+55')
-                ? this.getNumbers(`+${chatId}`).some(
-                    (v) => contact.name === v || contact.name === v.substring(3) || contact.name === v.substring(1),
-                  )
-                : false);
+            const nameNeedsUpdate = !contact.name || contact.name === chatId;
             this.logger.verbose(`Picture needs update: ${pictureNeedsUpdate}`);
             this.logger.verbose(`Name needs update: ${nameNeedsUpdate}`);
             if (pictureNeedsUpdate || nameNeedsUpdate) {
@@ -737,7 +739,7 @@ export class ChatwootService {
             isGroup,
             nameContact,
             picture_url.profilePictureUrl || null,
-            remoteJid,
+            phoneNumber,
           );
         }
 
@@ -753,46 +755,42 @@ export class ChatwootService {
           accountId: this.provider.accountId,
           id: contactId,
         })) as any;
-        this.logger.verbose(`Contact conversations: ${JSON.stringify(contactConversations)}`);
 
         if (!contactConversations || !contactConversations.payload) {
           this.logger.error(`No conversations found or payload is undefined`);
           return null;
         }
 
-        let inboxConversation = null;
-
-        if (this.provider.reopenConversation) {
-          inboxConversation = this.findOpenConversation(contactConversations.payload, filterInbox.id);
+        let inboxConversation = contactConversations.payload.find(
+          (conversation) => conversation.inbox_id == filterInbox.id,
+        );
+        if (inboxConversation) {
+          if (this.provider.reopenConversation) {
+            this.logger.verbose(
+              `Found conversation in reopenConversation mode: ID: ${inboxConversation.id} - Name: ${inboxConversation.meta.sender.name} - Identifier: ${inboxConversation.meta.sender.identifier}`,
+            );
+            if (inboxConversation && this.provider.conversationPending && inboxConversation.status !== 'open') {
+              await client.conversations.toggleStatus({
+                accountId: this.provider.accountId,
+                conversationId: inboxConversation.id,
+                data: {
+                  status: 'pending',
+                },
+              });
+            }
+          } else {
+            inboxConversation = contactConversations.payload.find(
+              (conversation) =>
+                conversation && conversation.status !== 'resolved' && conversation.inbox_id == filterInbox.id,
+            );
+            this.logger.verbose(`Found conversation: ${JSON.stringify(inboxConversation)}`);
+          }
 
           if (inboxConversation) {
-            this.logger.verbose(
-              `Found open conversation in reopenConversation mode: ${JSON.stringify(inboxConversation)}`,
-            );
-          } else {
-            inboxConversation = await this.findAndReopenResolvedConversation(
-              client,
-              contactConversations.payload,
-              filterInbox.id,
-            );
+            this.logger.verbose(`Returning existing conversation ID: ${inboxConversation.id}`);
+            this.cache.set(cacheKey, inboxConversation.id, 1800);
+            return inboxConversation.id;
           }
-        } else {
-          inboxConversation = this.findOpenConversation(contactConversations.payload, filterInbox.id);
-          this.logger.verbose(`Found conversation: ${JSON.stringify(inboxConversation)}`);
-        }
-
-        if (inboxConversation) {
-          this.logger.verbose(`Returning existing conversation ID: ${inboxConversation.id}`);
-          this.cache.set(cacheKey, inboxConversation.id);
-          return inboxConversation.id;
-        }
-
-        if (await this.cache.has(cacheKey)) {
-          const conversationId = (await this.cache.get(cacheKey)) as number;
-          this.logger.warn(
-            `No active conversations found in Chatwoot, using cached conversation ID: ${conversationId} as fallback`,
-          );
-          return conversationId;
         }
 
         const data = {
@@ -802,14 +800,6 @@ export class ChatwootService {
 
         if (this.provider.conversationPending) {
           data['status'] = 'pending';
-        }
-
-        /*
-        Triple check after lock
-        Utilizei uma nova verificação para evitar que outra thread execute entre o terminio do while e o set lock
-        */
-        if (await this.cache.has(cacheKey)) {
-          return (await this.cache.get(cacheKey)) as number;
         }
 
         const conversation = await client.conversations.create({
@@ -823,7 +813,7 @@ export class ChatwootService {
         }
 
         this.logger.verbose(`New conversation created of ${remoteJid} with ID: ${conversation.id}`);
-        this.cache.set(cacheKey, conversation.id);
+        this.cache.set(cacheKey, conversation.id, 1800);
         return conversation.id;
       } finally {
         await this.cache.delete(lockKey);
@@ -833,45 +823,6 @@ export class ChatwootService {
       this.logger.error(`Error in createConversation: ${error}`);
       return null;
     }
-  }
-
-  private findOpenConversation(conversations: any[], inboxId: number): any | null {
-    const openConversation = conversations.find(
-      (conversation) => conversation && conversation.status !== 'resolved' && conversation.inbox_id == inboxId,
-    );
-
-    if (openConversation) {
-      this.logger.verbose(`Found open conversation: ${JSON.stringify(openConversation)}`);
-    }
-
-    return openConversation || null;
-  }
-
-  private async findAndReopenResolvedConversation(
-    client: any,
-    conversations: any[],
-    inboxId: number,
-  ): Promise<any | null> {
-    const resolvedConversation = conversations.find(
-      (conversation) => conversation && conversation.status === 'resolved' && conversation.inbox_id == inboxId,
-    );
-
-    if (resolvedConversation) {
-      this.logger.verbose(`Found resolved conversation to reopen: ${JSON.stringify(resolvedConversation)}`);
-      if (this.provider.conversationPending && resolvedConversation.status !== 'open') {
-        await client.conversations.toggleStatus({
-          accountId: this.provider.accountId,
-          conversationId: resolvedConversation.id,
-          data: {
-            status: 'pending',
-          },
-        });
-        this.logger.verbose(`Reopened resolved conversation ID: ${resolvedConversation.id}`);
-      }
-      return resolvedConversation;
-    }
-
-    return null;
   }
 
   public async getInbox(instance: InstanceDto): Promise<inbox | null> {
@@ -921,7 +872,6 @@ export class ChatwootService {
     messageBody?: any,
     sourceId?: string,
     quotedMsg?: MessageModel,
-    messageBodyForRetry?: any,
   ) {
     const client = await this.clientCw(instance);
 
@@ -930,86 +880,32 @@ export class ChatwootService {
       return null;
     }
 
-    const doCreateMessage = async (convId: number) => {
-      const replyToIds = await this.getReplyToIds(messageBody, instance);
+    const replyToIds = await this.getReplyToIds(messageBody, instance);
 
-      const sourceReplyId = quotedMsg?.chatwootMessageId || null;
+    const sourceReplyId = quotedMsg?.chatwootMessageId || null;
 
-      const message = await client.messages.create({
-        accountId: this.provider.accountId,
-        conversationId: convId,
-        data: {
-          content: content,
-          message_type: messageType,
-          attachments: attachments,
-          private: privateMessage || false,
-          source_id: sourceId,
-          content_attributes: {
-            ...replyToIds,
-          },
-          source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
+    const message = await client.messages.create({
+      accountId: this.provider.accountId,
+      conversationId: conversationId,
+      data: {
+        content: content,
+        message_type: messageType,
+        attachments: attachments,
+        private: privateMessage || false,
+        source_id: sourceId,
+        content_attributes: {
+          ...replyToIds,
         },
-      });
+        source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
+      },
+    });
 
-      if (!message) {
-        this.logger.warn('message not found');
-        return null;
-      }
-
-      return message;
-    };
-
-    try {
-      return await doCreateMessage(conversationId);
-    } catch (error) {
-      return this.handleStaleConversationError(
-        error,
-        instance,
-        conversationId,
-        messageBody,
-        messageBodyForRetry,
-        'createMessage',
-        (newConvId) => doCreateMessage(newConvId),
-      );
+    if (!message) {
+      this.logger.warn('message not found');
+      return null;
     }
-  }
 
-  private async handleStaleConversationError(
-    error: any,
-    instance: InstanceDto,
-    conversationId: number,
-    messageBody: any,
-    messageBodyForRetry: any,
-    functionName: string,
-    originalFunction: (newConversationId: number) => Promise<any>,
-  ) {
-    if (axios.isAxiosError(error) && error.response?.status === 404) {
-      this.logger.warn(
-        `Conversation ${conversationId} not found in Chatwoot. Retrying operation from ${functionName}...`,
-      );
-      const bodyForRetry = messageBodyForRetry || messageBody;
-
-      if (!bodyForRetry || !bodyForRetry.key?.remoteJid) {
-        this.logger.error(`Cannot retry ${functionName} without a message body for context.`);
-        return null;
-      }
-
-      const { remoteJid } = bodyForRetry.key;
-      const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
-      await this.cache.delete(cacheKey);
-
-      const newConversationId = await this.createConversation(instance, bodyForRetry);
-      if (!newConversationId) {
-        this.logger.error(`Failed to create new conversation for ${remoteJid} during retry.`);
-        return null;
-      }
-
-      this.logger.log(`Retrying ${functionName} for ${remoteJid} with new conversation ${newConversationId}`);
-      return await originalFunction(newConversationId);
-    } else {
-      this.logger.error(`Error in ${functionName}: ${error}`);
-      throw error;
-    }
+    return message;
   }
 
   public async getOpenConversationByContact(
@@ -1094,7 +990,7 @@ export class ChatwootService {
 
   private async sendData(
     conversationId: number,
-    fileData: Buffer | Readable,
+    fileStream: Readable,
     fileName: string,
     messageType: 'incoming' | 'outgoing' | undefined,
     content?: string,
@@ -1102,7 +998,6 @@ export class ChatwootService {
     messageBody?: any,
     sourceId?: string,
     quotedMsg?: MessageModel,
-    messageBodyForRetry?: any,
   ) {
     if (sourceId && this.isImportHistoryAvailable()) {
       const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId], conversationId);
@@ -1113,67 +1008,54 @@ export class ChatwootService {
         }
       }
     }
-    const doSendData = async (convId: number) => {
-      const data = new FormData();
+    const data = new FormData();
 
-      if (content) {
-        data.append('content', content);
+    if (content) {
+      data.append('content', content);
+    }
+
+    data.append('message_type', messageType);
+
+    data.append('attachments[]', fileStream, { filename: fileName });
+
+    const sourceReplyId = quotedMsg?.chatwootMessageId || null;
+
+    if (messageBody && instance) {
+      const replyToIds = await this.getReplyToIds(messageBody, instance);
+
+      if (replyToIds.in_reply_to || replyToIds.in_reply_to_external_id) {
+        const content = JSON.stringify({
+          ...replyToIds,
+        });
+        data.append('content_attributes', content);
       }
+    }
 
-      data.append('message_type', messageType);
+    if (sourceReplyId) {
+      data.append('source_reply_id', sourceReplyId.toString());
+    }
 
-      if (fileData && fileName) {
-        data.append('attachments[]', fileData, { filename: fileName });
-      }
+    if (sourceId) {
+      data.append('source_id', sourceId);
+    }
 
-      const sourceReplyId = quotedMsg?.chatwootMessageId || null;
-
-      if (messageBody && instance) {
-        const replyToIds = await this.getReplyToIds(messageBody, instance);
-
-        if (replyToIds.in_reply_to || replyToIds.in_reply_to_external_id) {
-          const content = JSON.stringify({
-            ...replyToIds,
-          });
-          data.append('content_attributes', content);
-        }
-      }
-
-      if (sourceReplyId) {
-        data.append('source_reply_id', sourceReplyId.toString());
-      }
-
-      if (sourceId) {
-        data.append('source_id', sourceId);
-      }
-
-      const config = {
-        method: 'post',
-        maxBodyLength: Infinity,
-        url: `${this.provider.url}/api/v1/accounts/${this.provider.accountId}/conversations/${convId}/messages`,
-        headers: {
-          api_access_token: this.provider.token,
-          ...data.getHeaders(),
-        },
-        data: data,
-      };
-
-      const { data: responseData } = await axios.request(config);
-      return responseData;
+    const config = {
+      method: 'post',
+      maxBodyLength: Infinity,
+      url: `${this.provider.url}/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/messages`,
+      headers: {
+        api_access_token: this.provider.token,
+        ...data.getHeaders(),
+      },
+      data: data,
     };
 
     try {
-      return await doSendData(conversationId);
+      const { data } = await axios.request(config);
+
+      return data;
     } catch (error) {
-      return this.handleStaleConversationError(
-        error,
-        instance,
-        conversationId,
-        messageBody,
-        messageBodyForRetry,
-        'sendData',
-        (newConvId) => doSendData(newConvId),
-      );
+      this.logger.error(error);
     }
   }
 
@@ -1252,140 +1134,20 @@ export class ChatwootService {
 
   public async sendAttachment(waInstance: any, number: string, media: any, caption?: string, options?: Options) {
     try {
-      // Sempre baixar o arquivo do MinIO/S3 antes de enviar
-      // URLs presigned podem expirar, então convertemos para base64
-      let mediaBuffer: Buffer;
-      let mimeType: string;
-      let fileName: string;
+      const parsedMedia = path.parse(decodeURIComponent(media));
+      let mimeType = mimeTypes.lookup(parsedMedia?.ext) || '';
+      let fileName = parsedMedia?.name + parsedMedia?.ext;
 
-      try {
-        this.logger.verbose(`Downloading media from: ${media}`);
+      if (!mimeType) {
+        const parts = media.split('/');
+        fileName = decodeURIComponent(parts[parts.length - 1]);
 
-        // Tentar fazer download do arquivo com autenticação do Chatwoot
-        // maxRedirects: 0 para não seguir redirects automaticamente
         const response = await axios.get(media, {
           responseType: 'arraybuffer',
-          timeout: this.MEDIA_DOWNLOAD_TIMEOUT_MS,
-          headers: {
-            api_access_token: this.provider.token,
-          },
-          maxRedirects: 0, // Não seguir redirects automaticamente
-          validateStatus: (status) => status < 500, // Aceitar redirects (301, 302, 307)
         });
-
-        this.logger.verbose(`Initial response status: ${response.status}`);
-
-        // Se for redirect, pegar a URL de destino e fazer novo request
-        if (response.status >= 300 && response.status < 400) {
-          const redirectUrl = response.headers.location;
-          this.logger.verbose(`Redirect to: ${redirectUrl}`);
-
-          if (redirectUrl) {
-            // Fazer novo request para a URL do S3/MinIO (sem autenticação, pois é presigned URL)
-            // IMPORTANTE: Chatwoot pode gerar a URL presigned ANTES de fazer upload
-            // Vamos tentar com retry usando exponential backoff se receber 404 (arquivo ainda não disponível)
-            this.logger.verbose('Downloading from S3/MinIO...');
-
-            let s3Response;
-            let retryCount = 0;
-            const maxRetries = this.S3_MAX_RETRIES;
-            const baseDelay = this.S3_BASE_DELAY_MS;
-            const maxDelay = this.S3_MAX_DELAY_MS;
-
-            while (retryCount <= maxRetries) {
-              s3Response = await axios.get(redirectUrl, {
-                responseType: 'arraybuffer',
-                timeout: this.MEDIA_DOWNLOAD_TIMEOUT_MS,
-                validateStatus: (status) => status < 500,
-              });
-
-              this.logger.verbose(
-                `S3 response status: ${s3Response.status}, size: ${s3Response.data?.byteLength || 0} bytes (attempt ${retryCount + 1}/${maxRetries + 1})`,
-              );
-
-              // Se não for 404, sair do loop
-              if (s3Response.status !== 404) {
-                break;
-              }
-
-              // Se for 404 e ainda tem tentativas, aguardar com exponential backoff e tentar novamente
-              if (retryCount < maxRetries) {
-                // Exponential backoff com max delay (seguindo padrão do webhook controller)
-                const backoffDelay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
-                const errorBody = s3Response.data?.toString ? s3Response.data.toString('utf-8') : s3Response.data;
-                this.logger.warn(
-                  `File not yet available in S3/MinIO (attempt ${retryCount + 1}/${maxRetries + 1}). Retrying in ${backoffDelay}ms with exponential backoff...`,
-                );
-                this.logger.verbose(`MinIO Response: ${errorBody}`);
-                await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-                retryCount++;
-              } else {
-                // Última tentativa falhou
-                break;
-              }
-            }
-
-            // Após todas as tentativas, verificar o status final
-            if (s3Response.status === 404) {
-              const errorBody = s3Response.data?.toString ? s3Response.data.toString('utf-8') : s3Response.data;
-              this.logger.error(`File not found in S3/MinIO after ${maxRetries + 1} attempts. URL: ${redirectUrl}`);
-              this.logger.error(`MinIO Error Response: ${errorBody}`);
-              throw new Error(
-                'File not found in S3/MinIO (404). The file may have been deleted, the URL is incorrect, or Chatwoot has not finished uploading yet.',
-              );
-            }
-
-            if (s3Response.status === 403) {
-              this.logger.error(`Access denied to S3/MinIO. URL may have expired: ${redirectUrl}`);
-              throw new Error(
-                'Access denied to S3/MinIO (403). Presigned URL may have expired. Check S3_PRESIGNED_EXPIRATION setting.',
-              );
-            }
-
-            if (s3Response.status >= 400) {
-              this.logger.error(`S3/MinIO error ${s3Response.status}: ${s3Response.statusText}`);
-              throw new Error(`S3/MinIO error ${s3Response.status}: ${s3Response.statusText}`);
-            }
-
-            mediaBuffer = Buffer.from(s3Response.data);
-            mimeType = s3Response.headers['content-type'] || 'application/octet-stream';
-            this.logger.verbose(`Downloaded ${mediaBuffer.length} bytes from S3, type: ${mimeType}`);
-          } else {
-            this.logger.error('Redirect response without Location header');
-            throw new Error('Redirect without Location header');
-          }
-        } else if (response.status === 404) {
-          this.logger.error(`File not found (404) at: ${media}`);
-          throw new Error('File not found (404). The attachment may not exist in Chatwoot storage.');
-        } else if (response.status >= 400) {
-          this.logger.error(`HTTP ${response.status}: ${response.statusText} for URL: ${media}`);
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        } else {
-          // Download direto sem redirect
-          mediaBuffer = Buffer.from(response.data);
-          mimeType = response.headers['content-type'] || 'application/octet-stream';
-          this.logger.verbose(`Downloaded ${mediaBuffer.length} bytes directly, type: ${mimeType}`);
-        }
-
-        // Extrair nome do arquivo da URL ou usar o content-disposition
-        const parsedMedia = path.parse(decodeURIComponent(media));
-        if (parsedMedia?.name && parsedMedia?.ext) {
-          fileName = parsedMedia.name + parsedMedia.ext;
-        } else {
-          const parts = media.split('/');
-          fileName = decodeURIComponent(parts[parts.length - 1].split('?')[0]);
-        }
-
-        this.logger.verbose(`File name: ${fileName}, size: ${mediaBuffer.length} bytes`);
-      } catch (downloadError) {
-        this.logger.error('[MEDIA DOWNLOAD] ❌ Error downloading media from: ' + media);
-        this.logger.error(`[MEDIA DOWNLOAD] Error message: ${downloadError.message}`);
-        this.logger.error(`[MEDIA DOWNLOAD] Error stack: ${downloadError.stack}`);
-        this.logger.error(`[MEDIA DOWNLOAD] Full error: ${JSON.stringify(downloadError, null, 2)}`);
-        throw new Error(`Failed to download media: ${downloadError.message}`);
+        mimeType = response.headers['content-type'];
       }
 
-      // Determinar o tipo de mídia pelo mimetype
       let type = 'document';
 
       switch (mimeType.split('/')[0]) {
@@ -1403,13 +1165,11 @@ export class ChatwootService {
           break;
       }
 
-      // Para áudio, usar base64 com data URI
       if (type === 'audio') {
-        const base64Audio = `data:${mimeType};base64,${mediaBuffer.toString('base64')}`;
         const data: SendAudioDto = {
           number: number,
-          audio: base64Audio,
-          delay: 1200,
+          audio: media,
+          delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
           quoted: options?.quoted,
         };
 
@@ -1420,12 +1180,8 @@ export class ChatwootService {
         return messageSent;
       }
 
-      // Para outros tipos, converter para base64 puro (sem prefixo data URI)
-      const base64Media = mediaBuffer.toString('base64');
-
-      const documentExtensions = ['.gif', '.svg', '.tiff', '.tif'];
-      const parsedExt = path.parse(fileName)?.ext;
-      if (type === 'image' && parsedExt && documentExtensions.includes(parsedExt)) {
+      const documentExtensions = ['.gif', '.svg', '.tiff', '.tif', '.dxf', '.dwg'];
+      if (type === 'image' && parsedMedia && documentExtensions.includes(parsedMedia?.ext)) {
         type = 'document';
       }
 
@@ -1433,7 +1189,7 @@ export class ChatwootService {
         number: number,
         mediatype: type as any,
         fileName: fileName,
-        media: base64Media, // Base64 puro, sem prefixo
+        media: media,
         delay: 1200,
         quoted: options?.quoted,
       };
@@ -1489,87 +1245,9 @@ export class ChatwootService {
     });
   }
 
-  /**
-   * Processa deleção de mensagem em background
-   * Método assíncrono chamado via setImmediate para não bloquear resposta do webhook
-   */
-  private async processDeletion(instance: InstanceDto, body: any, deleteLockKey: string) {
-    this.logger.warn(`[DELETE] 🗑️ Processing deletion - messageId: ${body.id}`);
-    const waInstance = this.waMonitor.waInstances[instance.instanceName];
-
-    // Buscar TODAS as mensagens com esse chatwootMessageId (pode ser múltiplos anexos)
-    const messages = await this.prismaRepository.message.findMany({
-      where: {
-        chatwootMessageId: body.id,
-        instanceId: instance.instanceId,
-      },
-    });
-
-    if (messages && messages.length > 0) {
-      this.logger.warn(`[DELETE] Found ${messages.length} message(s) to delete from Chatwoot message ${body.id}`);
-      this.logger.verbose(`[DELETE] Messages keys: ${messages.map((m) => (m.key as any)?.id).join(', ')}`);
-
-      // Deletar cada mensagem no WhatsApp
-      for (const message of messages) {
-        const key = message.key as ExtendedMessageKey;
-        this.logger.warn(
-          `[DELETE] Attempting to delete WhatsApp message - keyId: ${key?.id}, remoteJid: ${key?.remoteJid}`,
-        );
-
-        try {
-          await waInstance?.client.sendMessage(key.remoteJid, { delete: key });
-          this.logger.warn(`[DELETE] ✅ Message ${key.id} deleted in WhatsApp successfully`);
-        } catch (error) {
-          this.logger.error(`[DELETE] ❌ Error deleting message ${key.id} in WhatsApp: ${error}`);
-          this.logger.error(`[DELETE] Error details: ${JSON.stringify(error, null, 2)}`);
-        }
-      }
-
-      // Remover todas as mensagens do banco de dados
-      await this.prismaRepository.message.deleteMany({
-        where: {
-          instanceId: instance.instanceId,
-          chatwootMessageId: body.id,
-        },
-      });
-      this.logger.warn(`[DELETE] ✅ SUCCESS: ${messages.length} message(s) deleted from WhatsApp and database`);
-    } else {
-      // Mensagem não encontrada - pode ser uma mensagem antiga que foi substituída por edição
-      this.logger.warn(`[DELETE] ⚠️ WARNING: Message not found in DB - chatwootMessageId: ${body.id}`);
-    }
-
-    // Liberar lock após processar
-    await this.cache.delete(deleteLockKey);
-  }
-
   public async receiveWebhook(instance: InstanceDto, body: any) {
     try {
-      // IMPORTANTE: Verificar lock de deleção ANTES do delay inicial
-      // para evitar race condition com webhooks duplicados
-      let isDeletionEvent = false;
-      if (body.event === 'message_updated' && body.content_attributes?.deleted) {
-        isDeletionEvent = true;
-        const deleteLockKey = `${instance.instanceName}:deleteMessage-${body.id}`;
-
-        // Verificar se já está processando esta deleção
-        if (await this.cache.has(deleteLockKey)) {
-          this.logger.warn(`[DELETE] ⏭️ SKIPPING: Deletion already in progress for messageId: ${body.id}`);
-          return { message: 'already_processing' };
-        }
-
-        // Adquirir lock IMEDIATAMENTE por 30 segundos
-        await this.cache.set(deleteLockKey, true, 30);
-
-        this.logger.warn(
-          `[WEBHOOK-DELETE] Event: ${body.event}, messageId: ${body.id}, conversation: ${body.conversation?.id}`,
-        );
-      }
-
-      // Para deleções, processar IMEDIATAMENTE (sem delay)
-      // Para outros eventos, aguardar delay inicial
-      if (!isDeletionEvent) {
-        await new Promise((resolve) => setTimeout(resolve, this.WEBHOOK_INITIAL_DELAY_MS));
-      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
       const client = await this.clientCw(instance);
 
@@ -1586,39 +1264,6 @@ export class ChatwootService {
       ) {
         const keyToDelete = `${instance.instanceName}:createConversation-${body.meta.sender.identifier}`;
         this.cache.delete(keyToDelete);
-      }
-
-      // Log para debug de mensagens deletadas
-      if (body.event === 'message_updated') {
-        this.logger.verbose(
-          `Message updated event - deleted: ${body.content_attributes?.deleted}, messageId: ${body.id}`,
-        );
-      }
-
-      // Processar deleção de mensagem ANTES das outras validações
-      if (body.event === 'message_updated' && body.content_attributes?.deleted) {
-        // Lock já foi adquirido no início do método (antes do delay)
-        const deleteLockKey = `${instance.instanceName}:deleteMessage-${body.id}`;
-
-        // ESTRATÉGIA: Processar em background e responder IMEDIATAMENTE
-        // Isso evita timeout do Chatwoot (5s) quando há muitas imagens (> 5s de processamento)
-        this.logger.warn(`[DELETE] 🚀 Starting background deletion - messageId: ${body.id}`);
-
-        // Executar em background (sem await) - não bloqueia resposta do webhook
-        setImmediate(async () => {
-          try {
-            await this.processDeletion(instance, body, deleteLockKey);
-          } catch (error) {
-            this.logger.error(`[DELETE] ❌ Background deletion failed for messageId ${body.id}: ${error}`);
-          }
-        });
-
-        // RESPONDER IMEDIATAMENTE ao Chatwoot (< 50ms)
-        return {
-          message: 'deletion_accepted',
-          messageId: body.id,
-          note: 'Deletion is being processed in background',
-        };
       }
 
       if (
@@ -1642,6 +1287,30 @@ export class ChatwootService {
 
       const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
+      instance.instanceId = waInstance.instanceId;
+
+      if (body.event === 'message_updated' && body.content_attributes?.deleted) {
+        const message = await this.prismaRepository.message.findFirst({
+          where: {
+            chatwootMessageId: body.id,
+            instanceId: instance.instanceId,
+          },
+        });
+
+        if (message) {
+          const key = message.key as WAMessageKey;
+
+          await waInstance?.client.sendMessage(key.remoteJid, { delete: key });
+
+          await this.prismaRepository.message.deleteMany({
+            where: {
+              instanceId: instance.instanceId,
+              chatwootMessageId: body.id,
+            },
+          });
+        }
+        return { message: 'bot' };
+      }
 
       const cwBotContact = this.configService.get<Chatwoot>('CHATWOOT').BOT_CONTACT;
 
@@ -1738,63 +1407,44 @@ export class ChatwootService {
 
         for (const message of body.conversation.messages) {
           if (message.attachments && message.attachments.length > 0) {
-            // Processa anexos de forma assíncrona para não bloquear o webhook
-            const processAttachments = async () => {
-              for (const attachment of message.attachments) {
-                if (!messageReceived) {
-                  formatText = null;
-                }
-
-                const options: Options = {
-                  quoted: await this.getQuotedMessage(body, instance),
-                };
-
-                try {
-                  const messageSent = await this.sendAttachment(
-                    waInstance,
-                    chatId,
-                    attachment.data_url,
-                    formatText,
-                    options,
-                  );
-
-                  if (!messageSent && body.conversation?.id) {
-                    this.onSendMessageError(instance, body.conversation?.id);
-                  }
-
-                  if (messageSent) {
-                    await this.updateChatwootMessageId(
-                      {
-                        ...messageSent,
-                        owner: instance.instanceName,
-                      },
-                      {
-                        messageId: body.id,
-                        inboxId: body.inbox?.id,
-                        conversationId: body.conversation?.id,
-                        contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
-                      },
-                      instance,
-                    );
-                  }
-                } catch (error) {
-                  this.logger.error(error);
-                  if (body.conversation?.id) {
-                    this.onSendMessageError(instance, body.conversation?.id, error);
-                  }
-                }
+            for (const attachment of message.attachments) {
+              if (!messageReceived) {
+                formatText = null;
               }
-            };
 
-            // Executa em background sem bloquear
-            processAttachments().catch((error) => {
-              this.logger.error(error);
-            });
+              const options: Options = {
+                quoted: await this.getQuotedMessage(body, instance),
+              };
+
+              const messageSent = await this.sendAttachment(
+                waInstance,
+                chatId,
+                attachment.data_url,
+                formatText,
+                options,
+              );
+              if (!messageSent && body.conversation?.id) {
+                this.onSendMessageError(instance, body.conversation?.id);
+              }
+
+              await this.updateChatwootMessageId(
+                {
+                  ...messageSent,
+                },
+                {
+                  messageId: body.id,
+                  inboxId: body.inbox?.id,
+                  conversationId: body.conversation?.id,
+                  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+                },
+                instance,
+              );
+            }
           } else {
             const data: SendTextDto = {
               number: chatId,
               text: formatText,
-              delay: 1200,
+              delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
               quoted: await this.getQuotedMessage(body, instance),
             };
 
@@ -1812,7 +1462,9 @@ export class ChatwootService {
               }
 
               await this.updateChatwootMessageId(
-                messageSent, // Já tem instanceId
+                {
+                  ...messageSent,
+                },
                 {
                   messageId: body.id,
                   inboxId: body.inbox?.id,
@@ -1842,7 +1494,7 @@ export class ChatwootService {
             },
           });
           if (lastMessage && !lastMessage.chatwootIsRead) {
-            const key = lastMessage.key as ExtendedMessageKey;
+            const key = lastMessage.key as WAMessageKey;
 
             waInstance?.markMessageAsRead({
               readMessages: [
@@ -1879,7 +1531,7 @@ export class ChatwootService {
         const data: SendTextDto = {
           number: chatId,
           text: body.content.replace(/\\\r\n|\\\n|\n/g, '\n'),
-          delay: 1200,
+          delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
         };
 
         sendTelemetry('/message/sendText');
@@ -1900,58 +1552,9 @@ export class ChatwootService {
     chatwootMessageIds: ChatwootMessage,
     instance: InstanceDto,
   ) {
-    const key = message.key as ExtendedMessageKey;
+    const key = message.key as WAMessageKey;
 
     if (!chatwootMessageIds.messageId || !key?.id) {
-      this.logger.verbose(
-        `Skipping updateChatwootMessageId - messageId: ${chatwootMessageIds.messageId}, keyId: ${key?.id}`,
-      );
-      return;
-    }
-
-    // Use instanceId from message or fallback to instance
-    const instanceId = message.instanceId || instance.instanceId;
-
-    this.logger.verbose(
-      `Updating message with chatwootMessageId: ${chatwootMessageIds.messageId}, keyId: ${key.id}, instanceId: ${instanceId}`,
-    );
-
-    // Verifica se a mensagem existe antes de atualizar usando polling com exponential backoff
-    let retries = 0;
-    const maxRetries = this.DB_POLLING_MAX_RETRIES;
-    const baseDelay = this.DB_POLLING_BASE_DELAY_MS;
-    const maxDelay = this.DB_POLLING_MAX_DELAY_MS;
-    let messageExists = false;
-
-    while (retries < maxRetries && !messageExists) {
-      const existingMessage = await this.prismaRepository.message.findFirst({
-        where: {
-          instanceId: instanceId,
-          key: {
-            path: ['id'],
-            equals: key.id,
-          },
-        },
-      });
-
-      if (existingMessage) {
-        messageExists = true;
-        this.logger.verbose(`Message found in database after ${retries} retries`);
-      } else {
-        retries++;
-        if (retries < maxRetries) {
-          // Exponential backoff com max delay (seguindo padrão do sistema)
-          const backoffDelay = Math.min(baseDelay * Math.pow(2, retries - 1), maxDelay);
-          this.logger.verbose(`Message not found, retry ${retries}/${maxRetries} in ${backoffDelay}ms`);
-          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-        } else {
-          this.logger.verbose(`Message not found after ${retries} attempts`);
-        }
-      }
-    }
-
-    if (!messageExists) {
-      this.logger.warn(`Message not found in database after ${maxRetries} retries, keyId: ${key.id}`);
       return;
     }
 
@@ -1964,7 +1567,7 @@ export class ChatwootService {
         "chatwootInboxId" = ${chatwootMessageIds.inboxId},
         "chatwootContactInboxSourceId" = ${chatwootMessageIds.contactInboxSourceId},
         "chatwootIsRead" = ${chatwootMessageIds.isRead || false}
-      WHERE "instanceId" = ${instanceId} 
+      WHERE "instanceId" = ${instance.instanceId} 
       AND "key"->>'id' = ${key.id}
     `;
 
@@ -2019,12 +1622,13 @@ export class ChatwootService {
         },
       });
 
-      const key = message?.key as ExtendedMessageKey;
+      const key = message?.key as WAMessageKey;
+      const messageContent = message?.message as WAMessageContent;
 
-      if (message && key?.id) {
+      if (messageContent && key?.id) {
         return {
-          key: message.key as proto.IMessageKey,
-          message: message.message as proto.IMessage,
+          key: key,
+          message: messageContent,
         };
       }
     }
@@ -2323,6 +1927,7 @@ export class ChatwootService {
       }
 
       if (event === 'messages.upsert' || event === 'send.message') {
+        this.logger.info(`[${event}] New message received - Instance: ${JSON.stringify(body, null, 2)}`);
         if (body.key.remoteJid === 'status@broadcast') {
           return;
         }
@@ -2406,30 +2011,32 @@ export class ChatwootService {
 
           const fileData = Buffer.from(downloadBase64.base64, 'base64');
 
+          const fileStream = new Readable();
+          fileStream._read = () => {};
+          fileStream.push(fileData);
+          fileStream.push(null);
+
           if (body.key.remoteJid.includes('@g.us')) {
             const participantName = body.pushName;
-            const rawPhoneNumber = body.key.participant.split('@')[0];
-            const phoneMatch = rawPhoneNumber.match(/^(\d{2})(\d{2})(\d{4})(\d{4})$/);
-
-            let formattedPhoneNumber: string;
-
-            if (phoneMatch) {
-              formattedPhoneNumber = `+${phoneMatch[1]} (${phoneMatch[2]}) ${phoneMatch[3]}-${phoneMatch[4]}`;
-            } else {
-              formattedPhoneNumber = `+${rawPhoneNumber}`;
-            }
+            const rawPhoneNumber =
+              body.key.addressingMode === 'lid' && !body.key.fromMe
+                ? body.key.participantAlt.split('@')[0].split(':')[0]
+                : body.key.participant.split('@')[0].split(':')[0];
+            const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
 
             let content: string;
 
             if (!body.key.fromMe) {
-              content = `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`;
+              content = bodyMessage
+                ? `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`
+                : `**${formattedPhoneNumber} - ${participantName}:**`;
             } else {
-              content = `${bodyMessage}`;
+              content = bodyMessage || '';
             }
 
             const send = await this.sendData(
               getConversation,
-              fileData,
+              fileStream,
               nameFile,
               messageType,
               content,
@@ -2437,7 +2044,6 @@ export class ChatwootService {
               body,
               'WAID:' + body.key.id,
               quotedMsg,
-              null,
             );
 
             if (!send) {
@@ -2449,7 +2055,7 @@ export class ChatwootService {
           } else {
             const send = await this.sendData(
               getConversation,
-              fileData,
+              fileStream,
               nameFile,
               messageType,
               bodyMessage,
@@ -2457,7 +2063,6 @@ export class ChatwootService {
               body,
               'WAID:' + body.key.id,
               quotedMsg,
-              null,
             );
 
             if (!send) {
@@ -2483,7 +2088,6 @@ export class ChatwootService {
               },
               'WAID:' + body.key.id,
               quotedMsg,
-              body,
             );
             if (!send) {
               this.logger.warn('message not sent');
@@ -2517,6 +2121,11 @@ export class ChatwootService {
           });
           const processedBuffer = await img.getBuffer(JimpMime.png);
 
+          const fileStream = new Readable();
+          fileStream._read = () => {}; // _read is required but you can noop it
+          fileStream.push(processedBuffer);
+          fileStream.push(null);
+
           const truncStr = (str: string, len: number) => {
             if (!str) return '';
 
@@ -2528,15 +2137,13 @@ export class ChatwootService {
 
           const send = await this.sendData(
             getConversation,
-            processedBuffer,
+            fileStream,
             nameFile,
             messageType,
             `${bodyMessage}\n\n\n**${title}**\n${description}\n${adsMessage.sourceUrl}`,
             instance,
             body,
             'WAID:' + body.key.id,
-            quotedMsg,
-            null,
           );
 
           if (!send) {
@@ -2549,16 +2156,11 @@ export class ChatwootService {
 
         if (body.key.remoteJid.includes('@g.us')) {
           const participantName = body.pushName;
-          const rawPhoneNumber = body.key.participant.split('@')[0];
-          const phoneMatch = rawPhoneNumber.match(/^(\d{2})(\d{2})(\d{4})(\d{4})$/);
-
-          let formattedPhoneNumber: string;
-
-          if (phoneMatch) {
-            formattedPhoneNumber = `+${phoneMatch[1]} (${phoneMatch[2]}) ${phoneMatch[3]}-${phoneMatch[4]}`;
-          } else {
-            formattedPhoneNumber = `+${rawPhoneNumber}`;
-          }
+          const rawPhoneNumber =
+            body.key.addressingMode === 'lid' && !body.key.fromMe
+              ? body.key.participantAlt.split('@')[0].split(':')[0]
+              : body.key.participant.split('@')[0].split(':')[0];
+          const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
 
           let content: string;
 
@@ -2578,7 +2180,6 @@ export class ChatwootService {
             body,
             'WAID:' + body.key.id,
             quotedMsg,
-            null,
           );
 
           if (!send) {
@@ -2598,7 +2199,6 @@ export class ChatwootService {
             body,
             'WAID:' + body.key.id,
             quotedMsg,
-            null,
           );
 
           if (!send) {
@@ -2642,50 +2242,18 @@ export class ChatwootService {
       }
 
       if (event === 'messages.edit' || event === 'send.message.update') {
-        const editedMessageContent =
-          body?.editedMessage?.conversation || body?.editedMessage?.extendedTextMessage?.text;
+        const editedMessageContentRaw =
+          body?.editedMessage?.conversation ??
+          body?.editedMessage?.extendedTextMessage?.text ??
+          body?.editedMessage?.imageMessage?.caption ??
+          body?.editedMessage?.videoMessage?.caption ??
+          body?.editedMessage?.documentMessage?.caption ??
+          (typeof body?.text === 'string' ? body.text : undefined);
 
-        // Se não houver conteúdo editado, verificar se é uma deleção
-        if (!editedMessageContent || editedMessageContent.trim() === '') {
-          // Verificar se é uma mensagem revogada (messageStubType: 1)
-          const messageStubType = body?.update?.messageStubType || body?.messageStubType;
-          this.logger.verbose(
-            `No edited content found - messageStubType: ${messageStubType}, body.update: ${JSON.stringify(body?.update)}`,
-          );
+        const editedMessageContent = (editedMessageContentRaw ?? '').trim();
 
-          if (messageStubType === 1) {
-            // É uma mensagem deletada - processar exclusão no Chatwoot
-            this.logger.verbose('Message revoked detected, processing deletion in Chatwoot');
-
-            const message = await this.getMessageByKeyId(instance, body?.key?.id);
-
-            if (message?.chatwootMessageId && message?.chatwootConversationId) {
-              try {
-                await client.messages.delete({
-                  accountId: this.provider.accountId,
-                  conversationId: message.chatwootConversationId,
-                  messageId: message.chatwootMessageId,
-                });
-                this.logger.verbose(`Deleted revoked message ${message.chatwootMessageId} in Chatwoot`);
-
-                // Remover do banco de dados
-                await this.prismaRepository.message.deleteMany({
-                  where: {
-                    key: {
-                      path: ['id'],
-                      equals: body.key.id,
-                    },
-                    instanceId: instance.instanceId,
-                  },
-                });
-                this.logger.verbose(`Removed revoked message from database`);
-              } catch (error) {
-                this.logger.error(`Error deleting revoked message: ${error}`);
-              }
-            }
-          } else {
-            this.logger.verbose('Message deleted, skipping edit notification');
-          }
+        if (!editedMessageContent) {
+          this.logger.info('[CW.EDIT] Conteúdo vazio — ignorando (DELETE tratará se for revoke).');
           return;
         }
 
@@ -2696,24 +2264,13 @@ export class ChatwootService {
           return;
         }
 
-        const key = message.key as ExtendedMessageKey;
+        const key = message.key as WAMessageKey;
+
         const messageType = key?.fromMe ? 'outgoing' : 'incoming';
 
         if (message && message.chatwootConversationId && message.chatwootMessageId) {
-          // Deletar a mensagem original no Chatwoot
-          try {
-            await client.messages.delete({
-              accountId: this.provider.accountId,
-              conversationId: message.chatwootConversationId,
-              messageId: message.chatwootMessageId,
-            });
-            this.logger.verbose(`Deleted original message ${message.chatwootMessageId} for edit`);
-          } catch (error) {
-            this.logger.error(`Error deleting original message for edit: ${error}`);
-          }
-
           // Criar nova mensagem com formato: "Mensagem editada:\n\nteste1"
-          const editedText = `${i18next.t('cw.message.edited')}:\n\n${editedMessageContent}`;
+          const editedText = `\n\n\`${i18next.t('cw.message.edited')}:\`\n\n${editedMessageContent}`;
 
           const send = await this.createMessage(
             instance,
@@ -2727,32 +2284,10 @@ export class ChatwootService {
             },
             'WAID:' + body.key.id,
             null,
-            body,
           );
-
           if (!send) {
             this.logger.warn('edited message not sent');
             return;
-          }
-
-          this.logger.verbose(`Created edited message in Chatwoot with ID: ${send.id}`);
-
-          // Atualizar o chatwootMessageId no banco para apontar para a nova mensagem
-          // Isso permite que a exclusão funcione após a edição
-          try {
-            await this.prismaRepository.message.update({
-              where: {
-                id: message.id,
-              },
-              data: {
-                chatwootMessageId: send.id,
-              },
-            });
-            this.logger.verbose(
-              `Updated chatwootMessageId from ${message.chatwootMessageId} to ${send.id} for message ${body.key.id}`,
-            );
-          } catch (error) {
-            this.logger.error(`Error updating chatwootMessageId after edit: ${error}`);
           }
         }
         return;
@@ -2830,7 +2365,7 @@ export class ChatwootService {
           chatwootImport.clearAll(instance);
         }
         // Se não foi via QR code, verifica o throttling.
-        else if (timeSinceLastNotification >= MIN_CONNECTION_NOTIFICATION_INTERVAL_MS) {
+        else if (timeSinceLastNotification >= 30000) {
           const msgConnection = i18next.t('cw.inbox.connected');
           await this.createBotMessage(instance, msgConnection, 'incoming');
           waInstance.lastConnectionNotification = now;
@@ -3017,8 +2552,7 @@ export class ChatwootService {
       and created_at >= now() - interval '6h'
       order by created_at desc`;
 
-      const pgClient = await this.getPgClient();
-      const messagesData = (await pgClient.query(sqlMessages))?.rows;
+      const messagesData = (await this.pgClient.query(sqlMessages))?.rows;
       const ids: string[] = messagesData
         .filter((message) => !!message.source_id)
         .map((message) => message.source_id.replace('WAID:', ''));

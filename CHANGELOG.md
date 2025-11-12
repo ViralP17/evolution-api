@@ -1,4 +1,107 @@
-# 2.3.5 (develop)
+# 2.3.7 (2025-11-07)
+
+### Features
+
+* **WhatsApp Business Meta Templates**: Add update and delete endpoints for Meta templates
+  - New endpoints to edit and delete WhatsApp Business templates
+  - Added DTOs and validation schemas for template management
+  - Enhanced template lifecycle management capabilities
+
+### Fixed
+
+* **Baileys Message Processor**: Fix incoming message events not working after reconnection
+  - Added cleanup logic in mount() to prevent memory leaks from multiple subscriptions
+  - Recreate messageSubject if it was completed during logout
+  - Remount messageProcessor in connectToWhatsapp() to ensure subscription is active
+  - Fixed issue where onDestroy() calls complete() on RxJS Subject, making it permanently closed
+  - Ensures old subscriptions are properly cleaned up before creating new ones
+
+* **Baileys Authentication**: Resolve "waiting for message" state after reconnection
+  - Fixed Redis keys not being properly removed during instance logout
+  - Prevented loading of old/invalid cryptographic keys on reconnection
+  - Fixed blocking state where instances authenticate but cannot send messages
+  - Ensures new credentials (creds) are properly used after reconnection
+
+* **OnWhatsapp Cache**: Prevent unique constraint errors and optimize database writes
+  - Fixed `Unique constraint failed on the fields: (remoteJid)` error when sending to groups
+  - Refactored query to use OR condition finding by jidOptions or remoteJid
+  - Added deep comparison to skip unnecessary database updates
+  - Replaced sequential processing with Promise.allSettled for parallel execution
+  - Sorted JIDs alphabetically in jidOptions for accurate change detection
+  - Added normalizeJid helper function for cleaner code
+
+* **Proxy Integration**: Fix "Media upload failed on all hosts" error when using proxy
+  - Created makeProxyAgentUndici() for Undici-compatible proxy agents
+  - Fixed compatibility with Node.js 18+ native fetch() implementation
+  - Replaced traditional HttpsProxyAgent/SocksProxyAgent with Undici ProxyAgent
+  - Maintained legacy makeProxyAgent() for Axios compatibility
+  - Fixed protocol handling in makeProxyAgent to prevent undefined errors
+
+* **WhatsApp Business API**: Fix base64, filename and caption handling
+  - Corrected base64 media conversion in Business API
+  - Fixed filename handling for document messages
+  - Improved caption processing for media messages
+  - Enhanced remoteJid validation and processing
+
+* **Chat Service**: Fix fetchChats and message panel errors
+  - Fixed cleanMessageData errors in Manager message panel
+  - Improved chat fetching reliability
+  - Enhanced message data sanitization
+
+* **Contact Filtering**: Apply where filters correctly in findContacts endpoint
+  - Fixed endpoint to process all where clause fields (id, remoteJid, pushName)
+  - Previously only processed remoteJid field, ignoring other filters
+  - Added remoteJid field to contactValidateSchema for proper validation
+  - Maintained multi-tenant isolation with instanceId filtering
+  - Allows filtering contacts by any supported field instead of returning all contacts
+
+* **Chatwoot and Baileys Integration**: Multiple integration improvements
+  - Enhanced code formatting and consistency
+  - Fixed integration issues between Chatwoot and Baileys services
+  - Improved message handling and delivery
+
+### Code Quality & Refactoring
+
+* **Template Management**: Remove unused template edit/delete DTOs after refactoring
+* **Proxy Utilities**: Improve makeProxyAgent for Undici compatibility
+* **Code Formatting**: Enhance code formatting and consistency across services
+
+# 2.3.6 (2025-10-21)
+
+### Features
+
+* **Baileys, Chatwoot, OnWhatsapp Cache**: Multiple implementations and fixes
+  - Fixed cache for PN, LID and g.us numbers to send correct number
+  - Fixed audio and document sending via Chatwoot in Baileys channel
+  - Multiple fixes in Chatwoot integration
+  - Fixed ignored messages when receiving leads
+
+### Fixed
+
+* **Baileys**: Fix buffer storage in database
+  - Correctly save Uint8Array values to database
+* **Baileys**: Simplify logging of messageSent object
+  - Fixed "this.isZero not is function" error
+
+### Chore
+
+* **Version**: Bump version to 2.3.6 and update Baileys dependency to 7.0.0-rc.6
+* **Workflows**: Update checkout step to include submodules
+  - Added 'submodules: recursive' option to checkout step in multiple workflow files to ensure submodules are properly initialized during CI/CD processes
+* **Manager**: Update asset files and install process
+  - Updated subproject reference in evolution-manager-v2 to the latest commit
+  - Enhanced the manager_install.sh script to include npm install and build steps
+  - Replaced old JavaScript asset file with a new version for improved performance
+  - Added a new CSS file for consistent styling across the application
+
+# 2.3.5 (2025-10-15)
+
+### Features
+
+* **Chatwoot Enhancements**: Comprehensive improvements to message handling, editing, deletion and i18n
+* **Participants Data**: Add participantsData field maintaining backward compatibility for group participants
+* **LID to Phone Number**: Convert LID to phoneNumber on group participants
+* **Docker Configurations**: Add Kafka and frontend services to Docker configurations
 
 ### Fixed
 
@@ -7,9 +110,28 @@
   - Fixed `ERROR: relation "public.Instance" does not exist` issue in migration `20250918182355_add_kafka_integration`
   - Aligned table naming convention with other Evolution API migrations for consistency
   - Resolved database migration failure that prevented Kafka integration setup
-* **Update Baileys Version**: v7.0.0-rc.4
-* Refactor connection with PostgreSQL and improve message handling
+* **Update Baileys Version**: v7.0.0-rc.5 with compatibility fixes
+  - Fixed assertSessions signature compatibility using type assertion
+  - Fixed incompatibility in voice call (wavoip) with new Baileys version
+  - Handle undefined status in update by defaulting to 'DELETED'
+* **Chatwoot Improvements**: Multiple fixes for enhanced reliability
+  - Correct chatId extraction for non-group JIDs
+  - Resolve webhook timeout on deletion with 5+ images
+  - Improve error handling in Chatwoot messages
+  - Adjust conversation verification logic and cache
+  - Optimize conversation reopening logic and connection notification
+  - Fix conversation reopening and connection loop
+* **Baileys Message Handling**: Enhanced message processing
+  - Add warning log for messages not found
+  - Fix message verification in Baileys service
+  - Simplify linkPreview handling in BaileysStartupService
+* **Media Validation**: Fix media content validation
+* **PostgreSQL Connection**: Refactor connection with PostgreSQL and improve message handling
 
+### Code Quality & Refactoring
+
+* **Exponential Backoff**: Implement exponential backoff patterns and extract magic numbers to constants
+* **TypeScript Build**: Update TypeScript build process and dependencies
 
 ### 
 
