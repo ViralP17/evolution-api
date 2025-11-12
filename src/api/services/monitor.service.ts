@@ -265,6 +265,7 @@ export class WAMonitoringService {
           businessId: data.businessId,
           LicenseKey: data.LicenseKey,
           serverKey: data.serverkey,
+          scanAllowed: data.scanAllowed || 130,
         },
       });
     } catch (error) {

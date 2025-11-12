@@ -41,18 +41,18 @@ export class InstanceController {
       throw new BadRequestException('License Key is required');
     }
     try {
-      const res = await this.authService.checkLicenseKey(instanceData.LicenseKey);
-      if (!res) {
-        throw new UnauthorizedException('License Key is not valid');
-      }
-      const { scanAllowed, LicType } = res;
+      // const res = await this.authService.checkLicenseKey(instanceData.LicenseKey);
+      // if (!res) {
+      //   throw new UnauthorizedException('License Key is not valid');
+      // }
+      // const { scanAllowed, LicType } = res;
 
-      console.log('LicType & ScanAllowed', { LicType, scanAllowed });
+      // console.log('LicType & ScanAllowed', { LicType, scanAllowed });
 
-      const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
-      if (!allow) {
-        throw new UnauthorizedException('Connection creation limit reached');
-      }
+      // const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
+      // if (!allow) {
+      //   throw new UnauthorizedException('Connection creation limit reached');
+      // }
 
       const instance = channelController.init(instanceData, {
         configService: this.configService,
@@ -90,6 +90,7 @@ export class InstanceController {
         status: instanceData.status,
         LicenseKey: instanceData.LicenseKey,
         serverkey: instanceData.serverkey,
+        // scanAllowed
       });
 
       instance.setInstance({
@@ -172,13 +173,13 @@ export class InstanceController {
         let getQrcode: wa.QrCode;
 
         if (instanceData.qrcode && instanceData.integration === Integration.WHATSAPP_BAILEYS) {
-          const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
+          // const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
 
-          if (allow) {
+          // if (allow) {
             await instance.connectToWhatsapp(instanceData.number);
             await delay(5000);
             getQrcode = instance.qrCode;
-          }
+          // }
         }
 
         const result = {

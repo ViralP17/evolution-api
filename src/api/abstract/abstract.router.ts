@@ -7,6 +7,7 @@ import { BadRequestException } from '@exceptions';
 import { Request } from 'express';
 import { JSONSchema7 } from 'json-schema';
 import { validate } from 'jsonschema';
+import { configService, serverkey } from '@config/env.config';
 
 type DataValidate<T> = {
   request: Request;
@@ -36,7 +37,10 @@ export abstract class RouterBroker {
     if (request?.query && Object.keys(request.query).length > 0) {
       Object.assign(instance, request.query);
     }
-    instance['serverkey'] = (request.headers['serverkey'] as string) || 'local';
+
+    const env =await configService.get<serverkey>('SERVERKEY');
+    console.log({ env });
+    instance['serverkey'] = (request.headers['serverkey'] as string) || env;
 
     if (request.originalUrl.includes('/instance/create')) {
       Object.assign(instance, body);
