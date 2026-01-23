@@ -32,7 +32,7 @@ export class InstanceController {
     private readonly baileysCache: CacheService,
     private readonly providerFiles: ProviderFiles,
     private readonly authService: AuthService,
-  ) {}
+  ) { }
 
   private readonly logger = new Logger('InstanceController');
 
@@ -90,6 +90,7 @@ export class InstanceController {
         status: instanceData.status,
         LicenseKey: instanceData.LicenseKey,
         serverkey: instanceData.serverkey,
+        domain: instanceData.domain,
         // scanAllowed
       });
 
@@ -176,9 +177,9 @@ export class InstanceController {
           // const allow = await this.authService.isAllowedMoreScan(instanceData.LicenseKey, scanAllowed);
 
           // if (allow) {
-            await instance.connectToWhatsapp(instanceData.number);
-            await delay(5000);
-            getQrcode = instance.qrCode;
+          await instance.connectToWhatsapp(instanceData.number);
+          await delay(5000);
+          getQrcode = instance.qrCode;
           // }
         }
 
@@ -195,6 +196,7 @@ export class InstanceController {
                 : instance.connectionStatus?.state || 'unknown',
           },
           serverkey: instanceData?.serverkey,
+          domain: instanceData?.domain,
 
           hash,
           webhook: {
@@ -290,6 +292,7 @@ export class InstanceController {
               ? instance.connectionStatus
               : instance.connectionStatus?.state || 'unknown',
         },
+        domain: instanceData?.domain,
         hash,
         webhook: {
           webhookUrl: instanceData?.webhook?.url,
@@ -412,6 +415,145 @@ export class InstanceController {
           status: state,
         },
       };
+    } catch (error) {
+      this.logger.error(error);
+      return { error: true, message: error.toString() };
+    }
+  }
+
+  public async restartInstance1({ instanceName }: InstanceDto) {
+    try {
+      const instance = this.waMonitor.waInstances[instanceName];
+      const state = instance?.connectionStatus?.state;
+      console.log('state', state);
+      //console.log(this.waMonitor.waInstances);
+      //console.log('fetchStatus', await instance.client?.());
+      //console.log('authstate ', instance.client?.authState);
+      console.log('instance', instance);
+      console.log('ws connection is open? ', instance.client?.ws?.isOpen);
+      console.log('ws connection is close ? ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+
+      if (!state) {
+        throw new BadRequestException('The "' + instanceName + '" instance does not exist');
+      }
+
+      if (state == 'close') {
+        throw new BadRequestException('The "' + instanceName + '" instance is not connected');
+      } else if (state == 'open') {
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) instance.clearCacheChatwoot();
+        this.logger.info('restarting instance ' + instanceName);
+        console.log('ws connection is open? 2 ', instance.client?.ws?.isOpen);
+        console.log('ws connection is close ? 2 ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+        if (!instance.client?.ws?.isOpen) {
+          this.logger.info('ws connection not open in if condition trying to connect' + instanceName);
+          return await instance.connectToWhatsapp(instance.client?.number || null);
+        } else {
+          instance.client?.ws?.close();
+          console.log({ CLOSEDEBUG: 'close with 273 line ', instanceName, state });
+          instance.client?.end(new Error('restart 1'));
+          return await this.connectionState({ instanceName });
+        }
+      } else if (state == 'connecting') {
+        instance.client?.ws?.close();
+        console.log({ CLOSEDEBUG: 'close with 279 line ', instanceName, state, instance });
+
+        instance.client?.end(new Error('restart'));
+        return await this.connectToWhatsapp({ instanceName });
+      }
+    } catch (error) {
+      this.logger.error(error);
+      return { error: true, message: error.toString() };
+    }
+  }
+
+  public async restartInstance2({ instanceName }: InstanceDto) {
+    try {
+      const instance = this.waMonitor.waInstances[instanceName];
+      const state = instance?.connectionStatus?.state;
+      console.log('state', state);
+      //console.log(this.waMonitor.waInstances);
+      //console.log('fetchStatus', await instance.client?.());
+      //console.log('authstate ', instance.client?.authState);
+      console.log('instance', instance);
+      console.log('ws connection is open? ', instance.client?.ws?.isOpen);
+      console.log('ws connection is close ? ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+
+      if (!state) {
+        throw new BadRequestException('The "' + instanceName + '" instance does not exist');
+      }
+
+      if (state == 'close') {
+        throw new BadRequestException('The "' + instanceName + '" instance is not connected');
+      } else if (state == 'open') {
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) instance.clearCacheChatwoot();
+        this.logger.info('restarting instance ' + instanceName);
+        console.log('ws connection is open? 2 ', instance.client?.ws?.isOpen);
+        console.log('ws connection is close ? 2 ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+        if (!instance.client?.ws?.isOpen) {
+          this.logger.info('ws connection not open in if condition trying to connect' + instanceName);
+          instance.client?.ws?.connect();
+          console.log('ws connection is open? 3 ', instance.client?.ws?.isOpen);
+          return await this.connectionState({ instanceName });
+        } else {
+          instance.client?.ws?.close();
+          console.log({ CLOSEDEBUG: 'close with 273 line ', instanceName, state });
+          instance.client?.end(new Error('restart 1'));
+          return await this.connectionState({ instanceName });
+        }
+      } else if (state == 'connecting') {
+        instance.client?.ws?.close();
+        console.log({ CLOSEDEBUG: 'close with 279 line ', instanceName, state, instance });
+
+        instance.client?.end(new Error('restart'));
+        return await this.connectToWhatsapp({ instanceName });
+      }
+    } catch (error) {
+      this.logger.error(error);
+      return { error: true, message: error.toString() };
+    }
+  }
+
+  public async restartInstance3({ instanceName }: InstanceDto) {
+    try {
+      const instance = this.waMonitor.waInstances[instanceName];
+      const state = instance?.connectionStatus?.state;
+      console.log('state', state);
+      //console.log(this.waMonitor.waInstances);
+      //console.log('fetchStatus', await instance.client?.());
+      //console.log('authstate ', instance.client?.authState);
+      console.log('instance', instance);
+      console.log('ws connection is open? ', instance.client?.ws?.isOpen);
+      console.log('ws connection is close ? ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+
+      if (!state) {
+        throw new BadRequestException('The "' + instanceName + '" instance does not exist');
+      }
+
+      if (state == 'close') {
+        throw new BadRequestException('The "' + instanceName + '" instance is not connected');
+      } else if (state == 'open') {
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) instance.clearCacheChatwoot();
+        this.logger.info('restarting instance ' + instanceName);
+        console.log('ws connection is open? 2 ', instance.client?.ws?.isOpen);
+        console.log('ws connection is close ? 2 ', instance.client?.ws?.isClosed, instance.client?.ws?.isClosing);
+        if (!instance.client?.ws?.isOpen) {
+          this.logger.info('ws connection not open in if condition trying to connect' + instanceName);
+          instance.client?.waitForSocketOpen();
+          console.log('ws connection is open? 3 ', instance.client?.ws?.isOpen);
+          return await this.connectionState({ instanceName });
+        } else {
+          instance.client?.ws?.close();
+          console.log({ CLOSEDEBUG: 'close with 273 line ', instanceName, state });
+          instance.client?.end(new Error('restart 1'));
+          return await this.connectionState({ instanceName });
+        }
+      } else if (state == 'connecting') {
+        instance.client?.ws?.close();
+        console.log({ CLOSEDEBUG: 'close with 279 line ', instanceName, state, instance });
+
+        instance.client?.end(new Error('restart'));
+        return await this.connectToWhatsapp({ instanceName });
+      }
     } catch (error) {
       this.logger.error(error);
       return { error: true, message: error.toString() };
