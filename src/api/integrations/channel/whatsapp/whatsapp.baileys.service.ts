@@ -537,7 +537,7 @@ export class BaileysStartupService extends ChannelStartupService {
       if (instancList) {
         console.log('Duplicate number connected');
 
-        return this.logoutInstance('Duplicate number connected');
+        return this.logoutInstance();
       }
       this.logger.info(
         `
