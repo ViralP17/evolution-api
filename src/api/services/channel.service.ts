@@ -9,7 +9,7 @@ import { TypebotService } from '@api/integrations/chatbot/typebot/services/typeb
 import { PrismaRepository, Query } from '@api/repository/repository.service';
 import { eventManager, waMonitor } from '@api/server.module';
 import { Events, wa } from '@api/types/wa.types';
-import { Auth, Chatwoot, ConfigService, HttpServer, Proxy } from '@config/env.config';
+import { Auth, Chatwoot, ConfigService, Database, HttpServer, Proxy } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { NotFoundException } from '@exceptions';
 import { Contact, Message, Prisma } from '@prisma/client';
@@ -27,7 +27,7 @@ export class ChannelStartupService {
     public readonly eventEmitter: EventEmitter2,
     public readonly prismaRepository: PrismaRepository,
     public readonly chatwootCache: CacheService,
-  ) {}
+  ) { }
 
   public readonly logger = new Logger('ChannelStartupService');
 
@@ -844,16 +844,17 @@ export class ChannelStartupService {
       where['remoteJid'] = remoteJid;
     }
 
-    const timestampFilter =
-      query?.where?.messageTimestamp?.gte && query?.where?.messageTimestamp?.lte
-        ? Prisma.sql`
-        AND "Message"."messageTimestamp" >= ${Math.floor(new Date(query.where.messageTimestamp.gte).getTime() / 1000)}
-        AND "Message"."messageTimestamp" <= ${Math.floor(new Date(query.where.messageTimestamp.lte).getTime() / 1000)}`
-        : Prisma.sql``;
-
+    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
     const limit = query?.take ? Prisma.sql`LIMIT ${query.take}` : Prisma.sql``;
     const offset = query?.skip ? Prisma.sql`OFFSET ${query.skip}` : Prisma.sql``;
 
+    const timestampFilter =
+      query?.where?.messageTimestamp?.gte && query?.where?.messageTimestamp?.lte
+        ? Prisma.sql`
+          AND "Message"."messageTimestamp" >= ${Math.floor(new Date(query.where.messageTimestamp.gte).getTime() / 1000)}
+          AND "Message"."messageTimestamp" <= ${Math.floor(new Date(query.where.messageTimestamp.lte).getTime() / 1000)}`
+        : Prisma.sql``;
+        
     const results = await this.prismaRepository.$queryRaw`
       WITH rankedMessages AS (
         SELECT DISTINCT ON ("Message"."key"->>'remoteJid')
@@ -897,13 +898,12 @@ export class ChannelStartupService {
         LEFT JOIN "Chat" ON "Chat"."remoteJid" = "Message"."key"->>'remoteJid' AND "Chat"."instanceId" = "Message"."instanceId"
         WHERE "Message"."instanceId" = ${this.instanceId}
         -- ${remoteJid ? Prisma.sql`AND "Message"."key"->>'remoteJid' = ${remoteJid}` : Prisma.sql``}
-        ${
-          remoteJid
-            ? remoteJid === '%@g.us'
-              ? Prisma.sql`AND "Message"."key"->>'remoteJid' LIKE ${remoteJid}`
-              : Prisma.sql`AND "Message"."key"->>'remoteJid' = ${remoteJid}`
-            : Prisma.sql``
-        }
+        ${remoteJid
+        ? remoteJid === '%@g.us'
+          ? Prisma.sql`AND "Message"."key"->>'remoteJid' LIKE ${remoteJid}`
+          : Prisma.sql`AND "Message"."key"->>'remoteJid' = ${remoteJid}`
+        : Prisma.sql``
+      }
         ${timestampFilter}
         ORDER BY "Message"."key"->>'remoteJid', "Message"."messageTimestamp" DESC
       )
@@ -917,20 +917,20 @@ export class ChannelStartupService {
       const mappedResults = results.map((contact) => {
         const lastMessage = contact.lastMessageId
           ? {
-              id: contact.lastMessageId,
-              key: contact.lastMessage_key,
-              pushName: contact.lastMessagePushName,
-              name: contact.lastMessagePushName,
-              participant: contact.lastMessageParticipant,
-              messageType: contact.lastMessageMessageType,
-              message: contact.lastMessageMessage,
-              contextInfo: contact.lastMessageContextInfo,
-              source: contact.lastMessageSource,
-              messageTimestamp: contact.lastMessageMessageTimestamp,
-              instanceId: contact.lastMessageInstanceId,
-              sessionId: contact.lastMessageSessionId,
-              status: contact.lastMessageStatus,
-            }
+            id: contact.lastMessageId,
+            key: contact.lastMessage_key,
+            pushName: contact.lastMessagePushName,
+            name: contact.lastMessagePushName,
+            participant: contact.lastMessageParticipant,
+            messageType: contact.lastMessageMessageType,
+            message: contact.lastMessageMessage,
+            contextInfo: contact.lastMessageContextInfo,
+            source: contact.lastMessageSource,
+            messageTimestamp: contact.lastMessageMessageTimestamp,
+            instanceId: contact.lastMessageInstanceId,
+            sessionId: contact.lastMessageSessionId,
+            status: contact.lastMessageStatus,
+          }
           : undefined;
 
         return {
