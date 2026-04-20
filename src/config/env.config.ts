@@ -392,6 +392,9 @@ export type Facebook = {
 
 export type Sentry = {
   DSN?: string;
+  ENABLE_LOGS: boolean;
+  CONSOLE_LOG_LEVELS: string[];
+  SEND_DEFAULT_PII: boolean;
 };
 
 export type EventEmitter = {
@@ -923,6 +926,13 @@ export class ConfigService {
       },
       SENTRY: {
         DSN: process.env?.SENTRY_DSN,
+        ENABLE_LOGS: process.env?.SENTRY_ENABLE_LOGS === undefined || process.env?.SENTRY_ENABLE_LOGS === 'true',
+        CONSOLE_LOG_LEVELS:
+          process.env?.SENTRY_CONSOLE_LOG_LEVELS
+            ?.split(',')
+            .map((level) => level.trim().toLowerCase())
+            .filter(Boolean) || ['log', 'warn', 'error', 'info', 'debug', 'assert', 'trace'],
+        SEND_DEFAULT_PII: process.env?.SENTRY_SEND_DEFAULT_PII === 'true',
       },
       EVENT_EMITTER: {
         MAX_LISTENERS: Number.parseInt(process.env?.EVENT_EMITTER_MAX_LISTENERS) || 50,
