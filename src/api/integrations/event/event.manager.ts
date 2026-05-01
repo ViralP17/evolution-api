@@ -174,7 +174,7 @@ export class EventManager {
     if (data.webhook) {
       await this.webhook.set(instanceName, {
         webhook: {
-          enabled: true,
+          enabled: data.webhook?.enabled ?? true,
           events: data.webhook?.events,
           url: data.webhook?.url,
           headers: data.webhook?.headers,

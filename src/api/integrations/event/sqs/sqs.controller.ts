@@ -4,6 +4,7 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { CreateQueueCommand, DeleteQueueCommand, ListQueuesCommand, SQS } from '@aws-sdk/client-sqs';
 import { configService, HttpServer, Log, S3, Sqs } from '@config/env.config';
 import { Logger } from '@config/logger.config';
+import { WebhookUrlParserUtil } from '@api/utils/webhook-url-parser.util';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
 import { EventDto } from '../event.dto';
@@ -129,8 +130,28 @@ export class SqsController extends EventController implements EventControllerInt
         const rawBaseUrl = sqsConfig.BASE_URL || `https://sqs.${sqsConfig.REGION}.amazonaws.com`;
         const baseUrl = rawBaseUrl.replace(/\/+$/, '');
         const sqsUrl = `${baseUrl}/${sqsConfig.ACCOUNT_ID}/${queueName}`;
+        // Extract userid and dbname from webhook URL if available
+        let webhookParams: Record<string, any> = {};
+        try {
+          const webhook = await this.prisma.webhook.findFirst({
+            where: {
+              Instance: { name: instanceName }
+            }
+          });
+          if (webhook?.url) {
+            webhookParams = WebhookUrlParserUtil.extractParamsFromUrl(webhook.url);
+          }
+        } catch (err) {
+          // If webhook lookup fails, continue without webhook params
+          this.logger.debug({
+            message: 'Could not retrieve webhook parameters',
+            instanceName,
+            error: err instanceof Error ? err.message : 'Unknown error'
+          });
+        }
 
         const message = {
+          ...webhookParams,  // Add webhook-extracted params
           ...(extra ?? {}),
           event,
           instance: instanceName,

@@ -978,4 +978,49 @@ export class ChannelStartupService {
 
     return mediaTypes.some((type) => msg[type] && Object.keys(msg[type]).length > 0);
   }
+
+  /**
+   * Recursively unwraps WhatsApp message envelopes to extract the real message content.
+   * Handles ephemeralMessage, viewOnceMessage, and other wrapper types from Baileys.
+   * This is needed because WhatsApp Web sends media in wrapped envelope structures.
+   */
+  protected unwrapMediaMessageContent(message: any): any {
+    if (!message) return message;
+
+    // Define all known wrapper types that contain messages
+    const wrapperTypes = [
+      'ephemeralMessage',
+      'viewOnceMessage',
+      'viewOnceMessageV2',
+      'viewOnceMessageV2Extension',
+      'documentWithCaptionMessage',
+    ];
+
+    // Recursively unwrap until we hit the real message
+    let current = message;
+    let iterations = 0;
+    const maxIterations = 10; // Prevent infinite loops
+
+    while (iterations < maxIterations) {
+      iterations++;
+
+      // Check if current is a wrapper type
+      let foundWrapper = false;
+      for (const wrapper of wrapperTypes) {
+        if (current[wrapper]) {
+          // Extract the message from the wrapper
+          current = current[wrapper].message || current[wrapper];
+          foundWrapper = true;
+          break;
+        }
+      }
+
+      // If no wrapper found, we've reached the real message
+      if (!foundWrapper) {
+        break;
+      }
+    }
+
+    return current;
+  }
 }

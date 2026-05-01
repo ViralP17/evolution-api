@@ -1591,6 +1591,7 @@ export class BaileysStartupService extends ChannelStartupService {
                   if (!hasRealMedia) {
                     this.logger.warn('Message detected as media but contains no valid media content');
                   } else {
+                    console.log('Processing media upload for message:', message);
                     const media = await this.getBase64FromMediaMessage({ message }, true);
 
                     if (!media) {
@@ -4359,13 +4360,18 @@ export class BaileysStartupService extends ChannelStartupService {
         throw 'Message not found';
       }
 
-      for (const subtype of MessageSubtype) {
-        if (msg.message[subtype]) {
-          msg.message = msg.message[subtype].message;
-        }
-      }
+      // Use recursive unwrapper to handle all nested message wrappers (web ephemeral, viewOnce, etc)
+      msg.message = this.unwrapMediaMessageContent(msg.message);
 
-      if ('messageContextInfo' in msg.message && Object.keys(msg.message).length === 1) {
+      // Debug: Check what keys exist after unwrapping
+      const keys = Object.keys(msg.message).filter(k => msg.message[k] !== undefined && msg.message[k] !== null);
+      this.logger.debug(`After unwrap - message keys: ${JSON.stringify(keys)}, has imageMessage: ${'imageMessage' in msg.message}, has videoMessage: ${'videoMessage' in msg.message}`);
+
+      // Check if only contextInfo - need to check for actual media types
+      const mediaTypes = ['imageMessage', 'videoMessage', 'stickerMessage', 'documentMessage', 'documentWithCaptionMessage', 'ptvMessage', 'audioMessage'];
+      const hasMedia = mediaTypes.some(type => msg.message[type]);
+      
+      if (!hasMedia && Object.keys(msg.message).length <= 2) {
         this.logger.verbose('Message contains only messageContextInfo, skipping media processing');
         return null;
       }
