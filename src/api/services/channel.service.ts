@@ -873,7 +873,6 @@ export class ChannelStartupService {
             to_timestamp("Message"."messageTimestamp"::double precision),
             "Contact"."updatedAt"
           ) as "updatedAt",
-          "Chat"."name" as "pushName",
           "Chat"."createdAt" as "windowStart",
           "Chat"."createdAt" + INTERVAL '24 hours' as "windowExpires",
           "Chat"."unreadMessages" as "unreadMessages",
