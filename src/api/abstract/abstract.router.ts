@@ -58,7 +58,12 @@ export abstract class RouterBroker {
     instance['serverkey'] = (request.headers['serverkey'] as string) || env;
 
     if (request.originalUrl.includes('/instance/create')) {
-      Object.assign(instance, sanitizeUntrustedInput(body));
+      // On create there is no `:instanceName` URL param — the new instance's
+      // name/id legitimately come from the body. instanceId is regenerated in
+      // createInstance() and name uniqueness is enforced by the instance guard,
+      // so it is safe to take the raw body here (the sanitizer is only needed to
+      // stop body/query overriding the param-derived instance on other routes).
+      Object.assign(instance, body);
     }
 
     Object.assign(ref, body);

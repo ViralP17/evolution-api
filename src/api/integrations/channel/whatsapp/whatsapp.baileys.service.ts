@@ -291,18 +291,6 @@ export class BaileysStartupService extends ChannelStartupService {
     return this.stateConnection;
   }
 
-  private isGroupJid(jid?: string) {
-    return !!jid && jid.includes('@g.us');
-  }
-
-  private isGroupChatEnabled() {
-    return String(process.env.GROUP_CHAT ?? 'false').toLowerCase() === 'true';
-  }
-
-  private shouldIgnoreGroupJid(jid?: string) {
-    return (this.isGroupJid(jid) && !this.isGroupChatEnabled()) || jid === 'status@broadcast';
-  }
-
   public async logoutInstance() {
     // Mark instance as deleting to prevent reconnection attempts.
     this.isDeleting = true;
@@ -904,7 +892,6 @@ export class BaileysStartupService extends ChannelStartupService {
       const existingChatIdSet = new Set(existingChatIds.map((chat) => chat.remoteJid));
 
       const chatsToInsert = chats
-        .filter((chat) => !this.shouldIgnoreGroupJid(chat.id))
         .filter((chat) => !existingChatIdSet?.has(chat.id))
         .map((chat) => ({
           remoteJid: chat.id,
@@ -929,16 +916,12 @@ export class BaileysStartupService extends ChannelStartupService {
       >[],
     ) => {
       const chatsRaw = chats.map((chat) => {
-        if (this.shouldIgnoreGroupJid(chat.id)) {
-          return null;
-        }
-
         return { remoteJid: chat.id, instanceId: this.instanceId };
-      }).filter(Boolean) as { remoteJid: string; instanceId: string }[];
+      });
 
       this.sendDataWebhook(Events.CHATS_UPDATE, chatsRaw);
 
-      for (const chat of chats.filter((currentChat) => !this.shouldIgnoreGroupJid(currentChat.id))) {
+      for (const chat of chats) {
         await this.prismaRepository.chat.updateMany({
           where: { instanceId: this.instanceId, remoteJid: chat.id, name: chat.name },
           data: { remoteJid: chat.id },
@@ -959,9 +942,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly contactHandle = {
     'contacts.upsert': async (contacts: Contact[]) => {
       try {
-        const filteredContacts = contacts.filter((contact) => !this.shouldIgnoreGroupJid(contact.id));
-
-        const contactsRaw: any = filteredContacts.map((contact) => ({
+        const contactsRaw: any = contacts.map((contact) => ({
           remoteJid: contact.id,
           pushName: contact?.name || contact?.verifiedName || contact.id.split('@')[0],
           profilePicUrl: null,
@@ -997,7 +978,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         const updatedContacts = await Promise.all(
-          filteredContacts.map(async (contact) => ({
+          contacts.map(async (contact) => ({
             remoteJid: contact.id,
             pushName: contact?.name || contact?.verifiedName || contact.id.split('@')[0],
             profilePicUrl: (await this.profilePicture(contact.id)).profilePictureUrl,
@@ -1050,10 +1031,6 @@ export class BaileysStartupService extends ChannelStartupService {
     'contacts.update': async (contacts: Partial<Contact>[]) => {
       const contactsRaw: { remoteJid: string; pushName?: string; profilePicUrl?: string; instanceId: string }[] = [];
       for await (const contact of contacts) {
-        if (this.shouldIgnoreGroupJid(contact.id)) {
-          continue;
-        }
-
         this.logger.debug(`Updating contact: ${JSON.stringify(contact, null, 2)}`);
         contactsRaw.push({
           remoteJid: contact.id,
@@ -1188,10 +1165,6 @@ export class BaileysStartupService extends ChannelStartupService {
         );
 
         for (const chat of chats) {
-          if (this.isGroupJid(chat.id)) {
-            continue;
-          }
-
           if (chatsRepository?.has(chat.id)) {
             continue;
           }
@@ -1311,9 +1284,7 @@ export class BaileysStartupService extends ChannelStartupService {
         this.historySyncContactCount += filteredContacts.length;
 
         await this.contactHandle['contacts.upsert'](
-          filteredContacts
-            .filter((c) => !this.shouldIgnoreGroupJid(c.id))
-            .map((c) => ({ id: c.id, name: c.name ?? c.notify })),
+          filteredContacts.map((c) => ({ id: c.id, name: c.name ?? c.notify })),
         );
 
         if (normalizedProgress === 100) {
@@ -1431,10 +1402,6 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           received.messageTimestamp = this.normalizeMessageTimestamp(received.messageTimestamp);
-
-          if (this.shouldIgnoreGroupJid(received.key.remoteJid)) {
-            continue;
-          }
 
           if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
             continue;
@@ -1778,7 +1745,7 @@ export class BaileysStartupService extends ChannelStartupService {
             instanceId: this.instanceId,
           };
 
-          if (this.shouldIgnoreGroupJid(contactRaw.remoteJid)) {
+          if (contactRaw.remoteJid === 'status@broadcast') {
             continue;
           }
 
@@ -1846,10 +1813,6 @@ export class BaileysStartupService extends ChannelStartupService {
 
         const normalizedRemoteJid = keyAny.remoteJid;
         const normalizedParticipant = keyAny.participant;
-
-        if (this.shouldIgnoreGroupJid(normalizedRemoteJid)) {
-          continue;
-        }
 
         if (settings?.groupsIgnore && normalizedRemoteJid?.includes('@g.us')) {
           continue;
