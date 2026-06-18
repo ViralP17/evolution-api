@@ -568,7 +568,6 @@ export class ChatwootService {
     const phoneNumbers = this.getNumbers(query);
     const searchableFields = this.getSearchableFields();
 
-    // eslint-disable-next-line prettier/prettier
     if (contacts.length === 2 && this.getClientCwConfig().mergeBrazilContacts && query.startsWith('+55')) {
       const contact = this.mergeBrazilianContacts(contacts);
       if (contact) {
@@ -1252,7 +1251,7 @@ export class ChatwootService {
         const response = await axios.get(media, {
           responseType: 'arraybuffer',
         });
-        mimeType = String(response.headers['content-type']);
+        mimeType = response.headers['content-type'] as string;
       }
 
       let type = 'document';
@@ -2402,7 +2401,7 @@ export class ChatwootService {
         if (isAdsMessage) {
           const imgBuffer = await axios.get(adsMessage.thumbnailUrl, { responseType: 'arraybuffer' });
 
-          const extension = mimeTypes.extension(String(imgBuffer.headers['content-type']));
+          const extension = mimeTypes.extension(imgBuffer.headers['content-type'] as string);
           const mimeType = extension && mimeTypes.lookup(extension);
 
           if (!mimeType) {
