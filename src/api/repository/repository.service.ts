@@ -17,8 +17,23 @@ function createPrismaAdapter(connectionString: string) {
   if (provider === 'mysql') {
     return new PrismaMariaDb(connectionString);
   }
-  // postgresql e psql_bouncer usam o adapter do Postgres
-  return new PrismaPg(connectionString);
+  // postgresql e psql_bouncer usam o adapter do Postgres.
+  // O driver adapter (pg) ignora o parâmetro `?schema=` da URI — recurso que só
+  // existia no conector nativo do Prisma. Extraímos o schema e:
+  //   1. passamos via opção `schema` (qualifica as queries geradas pelo Prisma);
+  //   2. definimos o `search_path` na conexão pg, para que as queries `$queryRaw`
+  //      (que referenciam tabelas sem prefixo, ex.: `FROM "Message"`) também
+  //      resolvam no schema correto.
+  let schema: string | undefined;
+  try {
+    schema = new URL(connectionString).searchParams.get('schema') ?? undefined;
+  } catch {
+    schema = undefined;
+  }
+  if (!schema) {
+    return new PrismaPg(connectionString);
+  }
+  return new PrismaPg({ connectionString, options: `-c search_path=${schema}` }, { schema });
 }
 
 export class PrismaRepository extends PrismaClient {
