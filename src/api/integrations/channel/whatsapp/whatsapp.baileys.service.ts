@@ -1642,7 +1642,7 @@ export class BaileysStartupService extends ChannelStartupService {
                     );
                     await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
 
-                    await this.prismaRepository.media.create({
+                    const createdMedia = await this.prismaRepository.media.create({
                       data: {
                         messageId: msg.id,
                         instanceId: this.instanceId,
@@ -1655,6 +1655,11 @@ export class BaileysStartupService extends ChannelStartupService {
                     const mediaUrl = await s3Service.getObjectUrl(fullName);
 
                     (messageRaw.message as any).mediaUrl = mediaUrl;
+                    // Stable S3 object key (does not expire) so the CRM can
+                    // regenerate a fresh presigned URL later via /s3/getMediaUrl.
+                    (messageRaw.message as any).mediaFileName = fullName;
+                    // Media record id — pass directly to POST /s3/getMediaUrl to mint a fresh URL.
+                    (messageRaw.message as any).mediaId = createdMedia.id;
 
                     await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
                   }
@@ -2826,13 +2831,18 @@ export class BaileysStartupService extends ChannelStartupService {
 
               await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
 
-              await this.prismaRepository.media.create({
+              const createdMedia = await this.prismaRepository.media.create({
                 data: { messageId: msg.id, instanceId: this.instanceId, type: mediaType, fileName: fullName, mimetype },
               });
 
               const mediaUrl = await s3Service.getObjectUrl(fullName);
 
               messageRaw.message.mediaUrl = mediaUrl;
+              // Stable S3 object key (does not expire) so the CRM can
+              // regenerate a fresh presigned URL later via /s3/getMediaUrl.
+              (messageRaw.message as any).mediaFileName = fullName;
+              // Media record id — pass directly to POST /s3/getMediaUrl to mint a fresh URL.
+              (messageRaw.message as any).mediaId = createdMedia.id;
 
               await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
             }
