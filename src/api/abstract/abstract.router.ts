@@ -56,7 +56,9 @@ export abstract class RouterBroker {
     instance['serverkey'] = (request.headers['serverkey'] as string) || env;
 
     if (request.originalUrl.includes('/instance/create')) {
-      Object.assign(instance, sanitizeUntrustedInput(body));
+      // Object.assign(instance, sanitizeUntrustedInput(body));
+      Object.assign(instance, body);
+
     }
 
     Object.assign(ref, body);
