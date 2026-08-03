@@ -41,9 +41,7 @@ export class S3Service {
 
   public async getMediaUrl(instance: InstanceDto, data: MediaDto) {
     const media = (await this.getMedia(instance, { id: data.id }))[0];
-    // `expiry` arrives as a string (schema-validated) but MinIO requires a number (seconds).
-    const expiry = data.expiry !== undefined && data.expiry !== null ? Number(data.expiry) : undefined;
-    const mediaUrl = await getObjectUrl(media.fileName, expiry);
+    const mediaUrl = await getObjectUrl(media.fileName, data.expiry);
     return {
       mediaUrl,
       ...media,
