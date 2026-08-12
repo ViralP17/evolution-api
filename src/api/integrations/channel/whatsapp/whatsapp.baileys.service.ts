@@ -792,6 +792,10 @@ export class BaileysStartupService extends ChannelStartupService {
       fireInitQueries: true,
       connectTimeoutMs: 30_000,
       keepAliveIntervalMs: 30_000,
+      // Baileys defaults this to 60s. A rate-limited query (e.g. profilePictureUrl)
+      // awaited in the messages.upsert loop would otherwise block message processing
+      // for a full 60s and batch incoming messages. Cap it so nothing stalls the loop.
+      defaultQueryTimeoutMs: 15_000,
       qrTimeout: 45_000,
       emitOwnEvents: false,
       shouldIgnoreJid: (jid) => {
@@ -1745,7 +1749,10 @@ export class BaileysStartupService extends ChannelStartupService {
           } = {
             remoteJid: received.key.remoteJid,
             pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+            // Reuse the already-known picture for existing contacts so we don't hit
+            // WhatsApp (profilePictureUrl) on every message. Only new contacts fetch,
+            // and that call is now capped (see profilePicture) so it can't stall the loop.
+            profilePicUrl: contact?.profilePicUrl ?? (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
             instanceId: this.instanceId,
           };
 
@@ -2329,7 +2336,13 @@ export class BaileysStartupService extends ChannelStartupService {
     const jid = createJid(number);
 
     try {
-      const profilePictureUrl = await this.client.profilePictureUrl(jid, 'image');
+      // Cap the query. Baileys' default query timeout is 60s, so a rate-limited
+      // profilePictureUrl would otherwise hang and block the messages.upsert loop,
+      // delaying all incoming messages into ~60s batches.
+      const profilePictureUrl = await Promise.race([
+        this.client.profilePictureUrl(jid, 'image'),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('profilePicture timeout')), 6000)),
+      ]);
 
       return { wuid: jid, profilePictureUrl };
     } catch {
