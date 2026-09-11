@@ -896,7 +896,6 @@ export class ChannelStartupService {
         LEFT JOIN "Contact" ON "Contact"."remoteJid" = "Message"."key"->>'remoteJid' AND "Contact"."instanceId" = "Message"."instanceId"
         LEFT JOIN "Chat" ON "Chat"."remoteJid" = "Message"."key"->>'remoteJid' AND "Chat"."instanceId" = "Message"."instanceId"
         WHERE "Message"."instanceId" = ${this.instanceId}
-        -- ${remoteJid ? Prisma.sql`AND "Message"."key"->>'remoteJid' = ${remoteJid}` : Prisma.sql``}
         ${remoteJid
         ? remoteJid === '%@g.us'
           ? Prisma.sql`AND "Message"."key"->>'remoteJid' LIKE ${remoteJid}`
