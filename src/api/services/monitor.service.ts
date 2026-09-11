@@ -184,7 +184,12 @@ export class WAMonitoringService {
       }
     }
 
-    if (this.redis.REDIS.ENABLED && this.redis.REDIS.SAVE_INSTANCES) {
+    // Must mirror the WRITE condition in use-multi-file-auth-state-prisma.ts, which
+    // stores the Baileys signal keys under `evolution:instance:<instanceId>` whenever
+    // REDIS.ENABLED is true — regardless of SAVE_INSTANCES. Gating the delete on
+    // SAVE_INSTANCES too meant that with SAVE_INSTANCES=false the keys were written
+    // but never removed, leaking one large hash per deleted instance (orphans).
+    if (this.redis.REDIS.ENABLED) {
       await this.cache.delete(instanceName);
       if (instanceDbId) {
         await this.cache.delete(instanceDbId);
