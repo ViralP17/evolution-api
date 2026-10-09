@@ -608,7 +608,9 @@ export class InstanceController {
     return await this.waMonitor.waInstances[instanceName].setPresence(data);
   }
 
-  public async logout({ instanceName }: InstanceDto) {
+  // `notify` sends our disconnect webhook (instance-disconnect.notifier.ts). deleteInstance passes false:
+  // a delete is reported through `instance.delete` instead.
+  public async logout({ instanceName }: InstanceDto, notify = true) {
     const { instance } = await this.connectionState({ instanceName });
 
     // Idempotente: se já está desconectada, retorna sucesso silenciosamente.
@@ -618,7 +620,15 @@ export class InstanceController {
     }
 
     try {
-      await this.waMonitor.waInstances[instanceName]?.logoutInstance();
+      const waInstance = this.waMonitor.waInstances[instanceName];
+
+      // Before logoutInstance(): it tears down the session the notifier reads from. Safe to send
+      // first — logoutInstance() closes the socket before any step that can throw.
+      if (notify) {
+        waInstance?.notifyDisconnected?.('manual', null, 'MANUAL_LOGOUT');
+      }
+
+      await waInstance?.logoutInstance();
 
       return { status: 'SUCCESS', error: false, response: { message: 'Instance logged out' } };
     } catch (error) {
@@ -634,7 +644,7 @@ export class InstanceController {
 
       if (instance.state === 'connecting' || instance.state === 'open') {
         try {
-          await this.logout({ instanceName });
+          await this.logout({ instanceName }, false);
         } catch (error) {
           // logout can throw "Connection Closed" when the underlying Baileys
           // socket is already dead but waInstances[name] still exists. We

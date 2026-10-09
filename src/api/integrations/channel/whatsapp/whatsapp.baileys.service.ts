@@ -63,6 +63,7 @@ import { PrismaRepository, Query } from '@api/repository/repository.service';
 import { chatbotController, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
+import { DisconnectTrigger, notifyInstanceDisconnected } from '@api/services/instance-disconnect.notifier';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
 import { CacheEngine } from '@cache/cacheengine';
 import {
@@ -288,6 +289,38 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public get connectionStatus() {
     return this.stateConnection;
+  }
+
+  // Sends our disconnect webhook (see instance-disconnect.notifier.ts).
+  // Must be called before logoutInstance(), while the session creds are still in memory.
+  public notifyDisconnected(
+    trigger: DisconnectTrigger,
+    reasonCode?: number | null,
+    reasonType?: 'MANUAL_LOGOUT' | 'DUPLICATE_NUMBER',
+  ) {
+    // Called from inside the disconnect/logout flows, so it must never throw into them.
+    try {
+      // Only a paired session can be "disconnected". Without this, a QR that times out (408)
+      // before being scanned would alert the client that a number they never connected dropped.
+      if (!this.instance.authState?.state?.creds?.me?.id) {
+        return;
+      }
+
+      notifyInstanceDisconnected({
+        instanceName: this.instance.name,
+        instanceId: this.instanceId,
+        ownerJid: this.instance.wuid || this.instance.ownerJid,
+        profileName: this.instance.profileName,
+        apikey: this.instance.token,
+        trigger,
+        reasonCode,
+        reasonType,
+        resolveWebhookUrl: async () =>
+          (await this.prismaRepository.webhook.findUnique({ where: { instanceId: this.instanceId } }))?.url,
+      });
+    } catch (error) {
+      this.logger.error({ message: 'notifyDisconnected failed', error: error?.message });
+    }
   }
 
   public async logoutInstance() {
@@ -535,6 +568,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }, 3000);
       } else {
         this.logger.info(`Skipping reconnection for status code ${statusCode} (code is in codesToNotReconnect list)`);
+        this.notifyDisconnected('whatsapp', statusCode);
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
           instance: this.instance.name,
           status: 'closed',
@@ -598,6 +632,7 @@ export class BaileysStartupService extends ChannelStartupService {
       if (instancList) {
         console.log('Duplicate number connected');
 
+        this.notifyDisconnected('system', null, 'DUPLICATE_NUMBER');
         return this.logoutInstance();
       }
       this.logger.info(
