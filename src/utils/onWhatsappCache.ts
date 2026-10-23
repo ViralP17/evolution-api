@@ -60,6 +60,16 @@ function getAvailableNumbers(remoteJid: string) {
   return numbersAvailable.map((number) => `${number}@${domain}`);
 }
 
+// `jidOptions contains <full jid>` cannot use the trigram index efficiently: the
+// "@s.whatsapp.net" part is present in every row, so Postgres ends up scanning the
+// whole table on every lookup. Matching the selective part (the number plus "@") lets
+// the index narrow it down; the full-JID condition keeps the match exactly as before.
+function jidOptionsContains(jid: string) {
+  return {
+    AND: [{ jidOptions: { contains: `${jid.split('@')[0]}@` } }, { jidOptions: { contains: jid } }],
+  };
+}
+
 interface ISaveOnWhatsappCacheParams {
   remoteJid: string;
   remoteJidAlt?: string;
@@ -102,7 +112,7 @@ export async function saveOnWhatsappCache(data: ISaveOnWhatsappCacheParams[]) {
       const existingRecord = await prismaRepository.isOnWhatsapp.findFirst({
         where: {
           OR: [
-            ...expandedJids.map((jid) => ({ jidOptions: { contains: jid } })),
+            ...expandedJids.map(jidOptionsContains),
             { remoteJid: remoteJid }, // TODO: Descobrir o motivo que causa o remoteJid não estar (às vezes) incluso na lista de jidOptions
           ],
         },
@@ -212,7 +222,7 @@ export async function getOnWhatsappCache(remoteJids: string[]) {
 
     const onWhatsappCache = await prismaRepository.isOnWhatsapp.findMany({
       where: {
-        OR: remoteJidsWithoutPlus.map((remoteJid) => ({ jidOptions: { contains: remoteJid } })),
+        OR: remoteJidsWithoutPlus.map(jidOptionsContains),
         updatedAt: {
           gte: dayjs().subtract(configService.get<Database>('DATABASE').SAVE_DATA.IS_ON_WHATSAPP_DAYS, 'days').toDate(),
         },
